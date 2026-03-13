@@ -12,6 +12,66 @@ pub enum InterruptLine {
     MachineExternal,
 }
 
+/// Aggregate interrupt state visible on the unified bus.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InterruptSet {
+    bits: u8,
+}
+
+impl InterruptSet {
+    const MACHINE_TIMER_BIT: u8 = 1 << 0;
+    const MACHINE_EXTERNAL_BIT: u8 = 1 << 1;
+
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self { bits: 0 }
+    }
+
+    #[must_use]
+    pub const fn from_line(line: InterruptLine) -> Self {
+        let bits = match line {
+            InterruptLine::MachineTimer => Self::MACHINE_TIMER_BIT,
+            InterruptLine::MachineExternal => Self::MACHINE_EXTERNAL_BIT,
+        };
+
+        Self { bits }
+    }
+
+    #[must_use]
+    pub const fn contains(self, line: InterruptLine) -> bool {
+        let mask = match line {
+            InterruptLine::MachineTimer => Self::MACHINE_TIMER_BIT,
+            InterruptLine::MachineExternal => Self::MACHINE_EXTERNAL_BIT,
+        };
+
+        (self.bits & mask) != 0
+    }
+
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self {
+            bits: self.bits | other.bits,
+        }
+    }
+
+    #[must_use]
+    pub const fn highest_priority(self) -> Option<InterruptLine> {
+        if self.contains(InterruptLine::MachineExternal) {
+            Some(InterruptLine::MachineExternal)
+        } else if self.contains(InterruptLine::MachineTimer) {
+            Some(InterruptLine::MachineTimer)
+        } else {
+            None
+        }
+    }
+}
+
+impl From<InterruptLine> for InterruptSet {
+    fn from(value: InterruptLine) -> Self {
+        Self::from_line(value)
+    }
+}
+
 /// A half-open physical address range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddressRange {
@@ -74,8 +134,11 @@ pub trait Addressable {
 
     fn reset(&mut self) {}
     fn tick(&mut self) {}
+    fn pending_interrupts(&self) -> InterruptSet {
+        InterruptSet::empty()
+    }
     fn pending_interrupt(&self) -> Option<InterruptLine> {
-        None
+        self.pending_interrupts().highest_priority()
     }
 
     fn load8(&mut self, addr: Address) -> Result<u8, BusError>;
@@ -87,8 +150,11 @@ pub trait Bus {
     fn load8(&mut self, addr: Address) -> Result<u8, BusError>;
     fn store8(&mut self, addr: Address, value: u8) -> Result<(), BusError>;
     fn tick(&mut self) {}
+    fn pending_interrupts(&self) -> InterruptSet {
+        InterruptSet::empty()
+    }
     fn pending_interrupt(&self) -> Option<InterruptLine> {
-        None
+        self.pending_interrupts().highest_priority()
     }
 
     fn load16(&mut self, addr: Address) -> Result<u16, BusError> {

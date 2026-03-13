@@ -1,4 +1,4 @@
-use rvsim_system::{Address, AddressRange, Addressable, BusError, InterruptLine};
+use rvsim_system::{Address, AddressRange, Addressable, BusError, InterruptLine, InterruptSet};
 
 const MTIME_LOW_OFFSET: Address = 0;
 const MTIME_HIGH_OFFSET: Address = 4;
@@ -90,8 +90,12 @@ impl Addressable for MachineTimer {
         self.mtime = self.mtime.wrapping_add(1);
     }
 
-    fn pending_interrupt(&self) -> Option<InterruptLine> {
-        (self.mtime >= self.mtimecmp).then_some(InterruptLine::MachineTimer)
+    fn pending_interrupts(&self) -> InterruptSet {
+        if self.mtime >= self.mtimecmp {
+            InterruptSet::from(InterruptLine::MachineTimer)
+        } else {
+            InterruptSet::empty()
+        }
     }
 
     fn load8(&mut self, addr: Address) -> Result<u8, BusError> {

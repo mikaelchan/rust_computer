@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use crate::bus::{Address, AddressRange, Addressable, Bus, BusError, InterruptLine};
+use crate::bus::{Address, AddressRange, Addressable, Bus, BusError, InterruptSet};
 
 struct DeviceSlot {
     range: AddressRange,
@@ -79,10 +79,12 @@ impl Bus for MemoryMap {
         }
     }
 
-    fn pending_interrupt(&self) -> Option<InterruptLine> {
+    fn pending_interrupts(&self) -> InterruptSet {
         self.devices
             .iter()
-            .find_map(|slot| slot.device.pending_interrupt())
+            .fold(InterruptSet::empty(), |interrupts, slot| {
+                interrupts.union(slot.device.pending_interrupts())
+            })
     }
 }
 
@@ -101,12 +103,13 @@ impl fmt::Debug for MemoryMap {
 #[cfg(test)]
 mod tests {
     use super::MemoryMap;
-    use crate::{AddressRange, Addressable, Bus, BusError};
+    use crate::{AddressRange, Addressable, Bus, BusError, InterruptLine, InterruptSet};
 
     #[derive(Debug)]
     struct CounterDevice {
         range: AddressRange,
         value: u8,
+        interrupts: InterruptSet,
     }
 
     impl Addressable for CounterDevice {
@@ -126,6 +129,10 @@ mod tests {
             self.value = value;
             Ok(())
         }
+
+        fn pending_interrupts(&self) -> InterruptSet {
+            self.interrupts
+        }
     }
 
     #[test]
@@ -134,10 +141,36 @@ mod tests {
         map.map_device(CounterDevice {
             range: AddressRange::new(0x1000, 4),
             value: 0,
+            interrupts: InterruptSet::empty(),
         })
         .expect("device should map");
 
         map.store8(0x1000, 7).expect("write should succeed");
         assert_eq!(map.load8(0x1000).expect("read should succeed"), 7);
+    }
+
+    #[test]
+    fn aggregates_interrupts_across_devices() {
+        let mut map = MemoryMap::new();
+        map.map_device(CounterDevice {
+            range: AddressRange::new(0x1000, 4),
+            value: 0,
+            interrupts: InterruptSet::from(InterruptLine::MachineTimer),
+        })
+        .expect("timer-like device should map");
+        map.map_device(CounterDevice {
+            range: AddressRange::new(0x2000, 4),
+            value: 0,
+            interrupts: InterruptSet::from(InterruptLine::MachineExternal),
+        })
+        .expect("external device should map");
+
+        let interrupts = map.pending_interrupts();
+        assert!(interrupts.contains(InterruptLine::MachineTimer));
+        assert!(interrupts.contains(InterruptLine::MachineExternal));
+        assert_eq!(
+            interrupts.highest_priority(),
+            Some(InterruptLine::MachineExternal)
+        );
     }
 }

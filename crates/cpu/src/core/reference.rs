@@ -65,7 +65,7 @@ impl Processor for ReferenceCore {
     fn step_cycle(&mut self, bus: &mut dyn Bus) -> Result<CpuCycle, Self::Error> {
         self.cycle += 1;
         self.state.csrs.increment_cycle();
-        self.state.csrs.sync_interrupt_line(bus.pending_interrupt());
+        self.state.csrs.sync_interrupts(bus.pending_interrupts());
 
         if self.state.halted {
             return Ok(CpuCycle {
@@ -74,13 +74,9 @@ impl Processor for ReferenceCore {
             });
         }
 
-        if self.state.csrs.machine_timer_interrupt_enabled() {
+        if let Some(interrupt) = self.state.csrs.pending_machine_interrupt() {
             let current_pc = self.state.pc;
-            self.last_result = apply_trap(
-                &mut self.state,
-                Trap::Interrupt(rvsim_isa::Interrupt::MachineTimer),
-                current_pc,
-            );
+            self.last_result = apply_trap(&mut self.state, Trap::Interrupt(interrupt), current_pc);
             return Ok(CpuCycle {
                 retired_instructions: 0,
                 stalled: true,
@@ -130,8 +126,8 @@ impl Processor for ReferenceCore {
 
 #[cfg(test)]
 mod tests {
-    use rvsim_devices::{MachineTimer, Rom};
-    use rvsim_system::{AddressRange, Bus, InterruptLine, Processor};
+    use rvsim_devices::{InterruptController, MachineTimer, Rom};
+    use rvsim_system::{AddressRange, Bus, InterruptLine, InterruptSet, Processor};
     use rvsim_system::{Machine, MemoryMap};
 
     use super::ReferenceCore;
@@ -165,7 +161,7 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct InterruptBus {
-        pending_interrupt: Option<InterruptLine>,
+        pending_interrupts: InterruptSet,
     }
 
     impl Bus for InterruptBus {
@@ -177,8 +173,8 @@ mod tests {
             Ok(())
         }
 
-        fn pending_interrupt(&self) -> Option<InterruptLine> {
-            self.pending_interrupt
+        fn pending_interrupts(&self) -> InterruptSet {
+            self.pending_interrupts
         }
     }
 
@@ -215,7 +211,7 @@ mod tests {
     #[test]
     fn takes_machine_timer_interrupt_when_enabled() {
         let mut bus = InterruptBus {
-            pending_interrupt: Some(InterruptLine::MachineTimer),
+            pending_interrupts: InterruptSet::from(InterruptLine::MachineTimer),
         };
         let mut core = ReferenceCore::new(0);
         core.hart_state_mut()
@@ -237,6 +233,32 @@ mod tests {
         assert_eq!(
             core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
             (1_u32 << 31) | 7
+        );
+    }
+
+    #[test]
+    fn interrupt_priority_prefers_machine_external_over_machine_timer() {
+        let mut bus = InterruptBus {
+            pending_interrupts: InterruptSet::from(InterruptLine::MachineTimer)
+                .union(InterruptSet::from(InterruptLine::MachineExternal)),
+        };
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, (1 << 7) | (1 << 11));
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x40);
+
+        core.step_cycle(&mut bus)
+            .expect("interrupt priority cycle should work");
+
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            (1_u32 << 31) | 11
         );
     }
 
@@ -305,6 +327,76 @@ mod tests {
                 .csrs
                 .read(rvsim_isa::CsrAddress::Mcause),
             (1_u32 << 31) | 7
+        );
+    }
+
+    #[test]
+    fn interrupt_controller_device_interrupts_through_machine_wrapper() {
+        const CONTROLLER_BASE: u64 = 0x4000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Rom::from_words(
+                0,
+                &[
+                    encode_jal(0, 0),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    encode_addi(10, 0, 2),
+                    encode_jal(0, 0),
+                ],
+            ))
+            .expect("rom should map");
+        memory
+            .map_device(InterruptController::new(CONTROLLER_BASE))
+            .expect("controller should map");
+
+        let mut machine = Machine::new(ReferenceCore::new(0), memory);
+        machine
+            .bus_mut()
+            .store32(CONTROLLER_BASE + 4, 1)
+            .expect("enable register should write");
+        machine
+            .bus_mut()
+            .store32(CONTROLLER_BASE + 8, 1)
+            .expect("set-pending register should write");
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 11);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        machine
+            .step_cycle()
+            .expect("external interrupt should be taken");
+        machine
+            .step_cycle()
+            .expect("handler instruction should run");
+
+        assert_eq!(machine.cpu().hart_state().pc, 0x24);
+        assert_eq!(machine.cpu().hart_state().registers.read(10), 2);
+        assert_eq!(
+            machine
+                .cpu()
+                .hart_state()
+                .csrs
+                .read(rvsim_isa::CsrAddress::Mcause),
+            (1_u32 << 31) | 11
         );
     }
 

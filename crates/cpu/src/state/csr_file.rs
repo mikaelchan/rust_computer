@@ -1,5 +1,5 @@
-use rvsim_isa::{CsrAddress, Trap};
-use rvsim_system::InterruptLine;
+use rvsim_isa::{CsrAddress, Interrupt, Trap};
+use rvsim_system::{InterruptLine, InterruptSet};
 
 use super::PrivilegeMode;
 
@@ -7,7 +7,9 @@ const MSTATUS_MIE: u32 = 1 << 3;
 const MSTATUS_MPIE: u32 = 1 << 7;
 const MSTATUS_MPP_SHIFT: u32 = 11;
 const MSTATUS_MPP_MASK: u32 = 0b11 << MSTATUS_MPP_SHIFT;
+const MIE_MEIE: u32 = 1 << 11;
 const MIE_MTIE: u32 = 1 << 7;
+const MIP_MEIP: u32 = 1 << 11;
 const MIP_MTIP: u32 = 1 << 7;
 
 /// Machine-mode CSR values required by the first milestone.
@@ -66,19 +68,58 @@ impl CsrFile {
         self.machine.mcycle = self.machine.mcycle.wrapping_add(1);
     }
 
-    pub fn sync_interrupt_line(&mut self, interrupt: Option<InterruptLine>) {
-        self.machine.mip &= !MIP_MTIP;
+    pub fn sync_interrupts(&mut self, interrupts: InterruptSet) {
+        self.machine.mip &= !(MIP_MEIP | MIP_MTIP);
 
-        if matches!(interrupt, Some(InterruptLine::MachineTimer)) {
+        if interrupts.contains(InterruptLine::MachineExternal) {
+            self.machine.mip |= MIP_MEIP;
+        }
+
+        if interrupts.contains(InterruptLine::MachineTimer) {
             self.machine.mip |= MIP_MTIP;
         }
     }
 
     #[must_use]
+    pub fn sync_interrupt_line(&mut self, interrupt: Option<InterruptLine>) {
+        self.sync_interrupts(
+            interrupt
+                .map(InterruptSet::from)
+                .unwrap_or_else(InterruptSet::empty),
+        );
+    }
+
+    #[must_use]
+    pub fn pending_machine_interrupt(&self) -> Option<Interrupt> {
+        if (self.machine.mstatus & MSTATUS_MIE) == 0 {
+            return None;
+        }
+
+        if (self.machine.mie & MIE_MEIE) != 0 && (self.machine.mip & MIP_MEIP) != 0 {
+            return Some(Interrupt::MachineExternal);
+        }
+
+        if (self.machine.mie & MIE_MTIE) != 0 && (self.machine.mip & MIP_MTIP) != 0 {
+            return Some(Interrupt::MachineTimer);
+        }
+
+        None
+    }
+
+    #[must_use]
     pub fn machine_timer_interrupt_enabled(&self) -> bool {
-        (self.machine.mstatus & MSTATUS_MIE) != 0
-            && (self.machine.mie & MIE_MTIE) != 0
-            && (self.machine.mip & MIP_MTIP) != 0
+        matches!(
+            self.pending_machine_interrupt(),
+            Some(Interrupt::MachineTimer)
+        )
+    }
+
+    #[must_use]
+    pub fn machine_external_interrupt_enabled(&self) -> bool {
+        matches!(
+            self.pending_machine_interrupt(),
+            Some(Interrupt::MachineExternal)
+        )
     }
 
     /// Record machine-mode trap state and return the handler PC derived from `mtvec`.
@@ -142,5 +183,40 @@ const fn privilege_from_bits(bits: u32) -> PrivilegeMode {
         0 => PrivilegeMode::User,
         1 => PrivilegeMode::Supervisor,
         _ => PrivilegeMode::Machine,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rvsim_isa::{CsrAddress, Interrupt};
+    use rvsim_system::{InterruptLine, InterruptSet};
+
+    use super::CsrFile;
+
+    #[test]
+    fn syncs_pending_machine_interrupt_bits_from_interrupt_set() {
+        let mut csrs = CsrFile::default();
+        csrs.sync_interrupts(
+            InterruptSet::from(InterruptLine::MachineTimer)
+                .union(InterruptSet::from(InterruptLine::MachineExternal)),
+        );
+
+        assert_eq!(csrs.read(CsrAddress::Mip), (1 << 7) | (1 << 11));
+    }
+
+    #[test]
+    fn prefers_machine_external_interrupt_over_machine_timer() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mstatus, 1 << 3);
+        csrs.write(CsrAddress::Mie, (1 << 7) | (1 << 11));
+        csrs.sync_interrupts(
+            InterruptSet::from(InterruptLine::MachineTimer)
+                .union(InterruptSet::from(InterruptLine::MachineExternal)),
+        );
+
+        assert_eq!(
+            csrs.pending_machine_interrupt(),
+            Some(Interrupt::MachineExternal)
+        );
     }
 }

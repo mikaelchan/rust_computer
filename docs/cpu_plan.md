@@ -16,7 +16,7 @@
 
 - Replace the static predictor with a 2-bit bimodal table.
 - Add trap-vector behavior and more complete CSR/system instruction support.
-- Introduce interrupt sources from timers and external devices.
+- Introduce interrupt sources from timers and external devices, then route them through a reusable interrupt controller.
 
 ## Phase 4
 

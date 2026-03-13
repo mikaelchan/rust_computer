@@ -152,7 +152,7 @@ impl Processor for PipelineCore {
         self.cycle += 1;
         self.stats.cycles += 1;
         self.state.csrs.increment_cycle();
-        self.state.csrs.sync_interrupt_line(bus.pending_interrupt());
+        self.state.csrs.sync_interrupts(bus.pending_interrupts());
 
         if self.state.halted {
             self.stats.fetch_stall_cycles += 1;
@@ -194,11 +194,11 @@ impl Processor for PipelineCore {
             retired_instructions += 1;
         }
 
-        if self.state.csrs.machine_timer_interrupt_enabled() {
+        if let Some(interrupt) = self.state.csrs.pending_machine_interrupt() {
             let current_pc = self.state.pc;
             trap_result = Some(apply_trap(
                 &mut self.state,
-                Trap::Interrupt(rvsim_isa::Interrupt::MachineTimer),
+                Trap::Interrupt(interrupt),
                 current_pc,
             ));
             next_front_end_pc = self.state.pc;
@@ -474,7 +474,7 @@ impl Processor for PipelineCore {
 
 #[cfg(test)]
 mod tests {
-    use rvsim_devices::{MachineTimer, Rom};
+    use rvsim_devices::{InterruptController, MachineTimer, Rom};
     use rvsim_system::{Bus, BusError, Machine, MemoryMap, Processor};
 
     use super::PipelineCore;
@@ -824,6 +824,84 @@ mod tests {
                 .csrs
                 .read(rvsim_isa::CsrAddress::Mcause),
             (1_u32 << 31) | 7
+        );
+        assert_eq!(machine.cpu().stats().trap_count, 1);
+        assert_eq!(machine.cpu().stats().trap_flushes, 1);
+    }
+
+    #[test]
+    fn takes_machine_external_interrupt_from_controller_device() {
+        const CONTROLLER_BASE: u64 = 0x4000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Rom::from_words(
+                0,
+                &[
+                    encode_addi(1, 0, 5),
+                    encode_jal(0, 0),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    encode_addi(10, 0, 2),
+                    encode_jal(0, 0),
+                ],
+            ))
+            .expect("rom should map");
+        memory
+            .map_device(InterruptController::new(CONTROLLER_BASE))
+            .expect("controller should map");
+
+        let mut machine = Machine::new(PipelineCore::new(0), memory);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 11);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        for _ in 0..5 {
+            machine
+                .step_cycle()
+                .expect("pipeline warmup cycle should work");
+        }
+
+        machine
+            .bus_mut()
+            .store32(CONTROLLER_BASE + 4, 1)
+            .expect("enable register should write");
+        machine
+            .bus_mut()
+            .store32(CONTROLLER_BASE + 8, 1)
+            .expect("set-pending register should write");
+
+        for _ in 0..8 {
+            machine
+                .step_cycle()
+                .expect("pipeline external interrupt cycle should work");
+        }
+
+        assert_eq!(machine.cpu().hart_state().registers.read(1), 5);
+        assert_eq!(machine.cpu().hart_state().registers.read(10), 2);
+        assert_eq!(
+            machine
+                .cpu()
+                .hart_state()
+                .csrs
+                .read(rvsim_isa::CsrAddress::Mcause),
+            (1_u32 << 31) | 11
         );
         assert_eq!(machine.cpu().stats().trap_count, 1);
         assert_eq!(machine.cpu().stats().trap_flushes, 1);
