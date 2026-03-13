@@ -10,3 +10,4 @@ pub mod trace;
 
 pub use core::{CpuError, CpuModel, PipelineCore, ReferenceCore};
 pub use state::{CsrFile, HartState, MachineCsrs, PrivilegeMode, RegisterFile};
+pub use trace::{CommitEvent, FlushReason, PipelineStats, PipelineTrace};

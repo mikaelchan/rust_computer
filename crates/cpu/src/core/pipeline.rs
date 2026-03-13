@@ -1,9 +1,9 @@
-use rvsim_isa::{Exception, Trap, opcode::InstructionKind};
+use rvsim_isa::{CsrAddress, Exception, Trap, opcode::InstructionKind};
 use rvsim_system::{Bus, BusError, CpuCycle, Processor, SimComponent};
 
 use crate::{
     core::{CpuError, CpuModel},
-    exec::{ExecutionResult, apply_trap, return_from_trap},
+    exec::{ExecutionResult, apply_trap},
     hazard::{
         control::detect_branch_flush,
         data::detect_raw_hazard,
@@ -19,7 +19,7 @@ use crate::{
     },
     predictor::{BimodalPredictor, BranchPredictor},
     state::HartState,
-    trace::PipelineTrace,
+    trace::{CommitEvent, FlushReason, PipelineStats, PipelineTrace},
 };
 
 /// A five-stage in-order pipeline with explicit latches and hazard handling.
@@ -32,8 +32,10 @@ pub struct PipelineCore {
     predictor: BimodalPredictor,
     latches: PipelineLatches,
     structural_hazards: StructuralHazardPolicy,
+    last_commit: Option<CommitEvent>,
     last_trace: PipelineTrace,
     last_result: ExecutionResult,
+    stats: PipelineStats,
 }
 
 impl PipelineCore {
@@ -47,8 +49,10 @@ impl PipelineCore {
             predictor: BimodalPredictor::default(),
             latches: PipelineLatches::default(),
             structural_hazards: StructuralHazardPolicy::default(),
+            last_commit: None,
             last_trace: PipelineTrace::default(),
             last_result: ExecutionResult::default(),
+            stats: PipelineStats::default(),
         }
     }
 
@@ -65,6 +69,16 @@ impl PipelineCore {
     #[must_use]
     pub const fn front_end_pc(&self) -> u32 {
         self.front_end_pc
+    }
+
+    #[must_use]
+    pub const fn last_commit(&self) -> Option<CommitEvent> {
+        self.last_commit
+    }
+
+    #[must_use]
+    pub const fn stats(&self) -> &PipelineStats {
+        &self.stats
     }
 
     fn forwarded_operand(
@@ -120,8 +134,10 @@ impl SimComponent for PipelineCore {
         self.front_end_pc = self.reset_vector;
         self.state.reset(self.reset_vector);
         self.latches = PipelineLatches::default();
+        self.last_commit = None;
         self.last_trace = PipelineTrace::default();
         self.last_result = ExecutionResult::default();
+        self.stats = PipelineStats::default();
     }
 }
 
@@ -134,8 +150,11 @@ impl Processor for PipelineCore {
 
     fn step_cycle(&mut self, bus: &mut dyn Bus) -> Result<CpuCycle, Self::Error> {
         self.cycle += 1;
+        self.stats.cycles += 1;
 
         if self.state.halted {
+            self.stats.fetch_stall_cycles += 1;
+            self.last_commit = None;
             self.last_trace = PipelineTrace {
                 cycle: self.cycle,
                 note: "halted",
@@ -165,9 +184,12 @@ impl Processor for PipelineCore {
         let mut fetched_pc = None;
         let mut predicted_taken = false;
         let mut trap_result = None;
+        let mut commit = None;
+        let mut flush_reason = None;
 
         if let Some(payload) = current.mem_wb.payload {
-            retired_instructions += wb_stage::write_back(&mut self.state, payload);
+            commit = Some(wb_stage::write_back(&mut self.state, payload));
+            retired_instructions += 1;
         }
 
         if let Some(payload) = current.ex_mem.payload {
@@ -184,6 +206,7 @@ impl Processor for PipelineCore {
                     trap_result = Some(apply_trap(&mut self.state, trap, payload.decoded.pc));
                     next_front_end_pc = self.state.pc;
                     flushed = true;
+                    flush_reason = Some(FlushReason::Trap);
                     note = "memory trap";
                 }
             }
@@ -204,7 +227,12 @@ impl Processor for PipelineCore {
                     current.mem_wb.payload,
                 );
 
-                match ex_stage::execute(payload.decoded, rs1_value, rs2_value) {
+                match ex_stage::execute(
+                    payload.decoded,
+                    rs1_value,
+                    rs2_value,
+                    self.state.csrs.read(CsrAddress::Mepc),
+                ) {
                     ExecuteEvent::Advance(outcome) => {
                         if matches!(payload.decoded.kind, InstructionKind::Branch(_)) {
                             self.predictor.update(
@@ -218,7 +246,24 @@ impl Processor for PipelineCore {
                         if flush_status.flush_required {
                             flushed = true;
                             next_front_end_pc = outcome.next_pc;
-                            note = "branch flush";
+                            flush_reason = Some(
+                                if matches!(
+                                    payload.decoded.kind,
+                                    InstructionKind::System(rvsim_isa::SystemKind::Mret)
+                                ) {
+                                    FlushReason::ReturnFromTrap
+                                } else {
+                                    FlushReason::BranchRedirect
+                                },
+                            );
+                            note = if matches!(
+                                payload.decoded.kind,
+                                InstructionKind::System(rvsim_isa::SystemKind::Mret)
+                            ) {
+                                "mret"
+                            } else {
+                                "branch flush"
+                            };
                         }
 
                         next.ex_mem.payload = Some(ExMemPayload {
@@ -233,13 +278,8 @@ impl Processor for PipelineCore {
                         trap_result = Some(apply_trap(&mut self.state, trap, payload.decoded.pc));
                         next_front_end_pc = self.state.pc;
                         flushed = true;
+                        flush_reason = Some(FlushReason::Trap);
                         note = "execute trap";
-                    }
-                    ExecuteEvent::ReturnFromTrap => {
-                        trap_result = Some(return_from_trap(&mut self.state));
-                        next_front_end_pc = self.state.pc;
-                        flushed = true;
-                        note = "mret";
                     }
                 }
             }
@@ -288,6 +328,7 @@ impl Processor for PipelineCore {
                         ));
                         next_front_end_pc = self.state.pc;
                         flushed = true;
+                        flush_reason = Some(FlushReason::Trap);
                         note = "illegal instruction";
                     }
                 }
@@ -316,6 +357,8 @@ impl Processor for PipelineCore {
                         fetch_pc,
                     ));
                     next_front_end_pc = self.state.pc;
+                    flushed = true;
+                    flush_reason = Some(FlushReason::Trap);
                     note = "instruction address misaligned";
                 }
                 Err(error) => return Err(error.into()),
@@ -337,8 +380,27 @@ impl Processor for PipelineCore {
                     .unwrap_or(false),
         };
 
+        self.stats.retired_instructions += result.retired;
+        self.stats.fetch_stall_cycles += u64::from(fetch_stalled);
+        self.stats.decode_stall_cycles += u64::from(decode_stalled);
+        self.stats.flush_cycles += u64::from(flushed);
+        self.stats.predicted_taken_fetches += u64::from(predicted_taken);
+
+        if let Some(reason) = flush_reason {
+            match reason {
+                FlushReason::BranchRedirect => self.stats.branch_flushes += 1,
+                FlushReason::Trap => self.stats.trap_flushes += 1,
+                FlushReason::ReturnFromTrap => self.stats.return_flushes += 1,
+            }
+        }
+
+        if result.trap.is_some() {
+            self.stats.trap_count += 1;
+        }
+
         self.front_end_pc = next_front_end_pc;
         self.latches = next;
+        self.last_commit = commit;
         self.last_result = result;
         self.last_trace = PipelineTrace {
             cycle: self.cycle,
@@ -347,6 +409,9 @@ impl Processor for PipelineCore {
             execute_pc,
             memory_pc,
             writeback_pc,
+            commit,
+            trap: self.last_result.trap,
+            flush_reason,
             retired_instructions,
             predicted_taken,
             fetch_stalled,
@@ -367,7 +432,7 @@ mod tests {
     use rvsim_system::{Bus, BusError, Processor};
 
     use super::PipelineCore;
-    use crate::core::CpuModel;
+    use crate::{FlushReason, core::CpuModel};
 
     #[derive(Debug, Clone)]
     struct TestBus {
@@ -541,6 +606,50 @@ mod tests {
 
         assert_eq!(core.hart_state().registers.read(1), 0);
         assert_eq!(core.hart_state().registers.read(2), 7);
+    }
+
+    #[test]
+    fn exposes_last_commit_and_cumulative_stats() {
+        let mut bus = TestBus::new(64);
+        bus.load_program(&[encode_addi(1, 0, 5), encode_jal(0, 0)]);
+
+        let mut core = PipelineCore::new(0);
+        for _ in 0..5 {
+            core.step_cycle(&mut bus)
+                .expect("pipeline cycle should work");
+        }
+
+        let commit = core.last_commit().expect("one instruction should commit");
+        assert_eq!(commit.pc, 0);
+        assert_eq!(commit.next_pc, 4);
+        assert_eq!(commit.destination, Some(1));
+        assert_eq!(commit.value, Some(5));
+        assert_eq!(core.stats().cycles, 5);
+        assert_eq!(core.stats().retired_instructions, 1);
+    }
+
+    #[test]
+    fn tracks_trap_flushes_in_trace_and_stats() {
+        let mut bus = TestBus::new(64);
+        bus.load_program(&[0xffff_ffff, encode_jal(0, 0)]);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 4);
+        let mut observed_trap_flush = false;
+        let mut observed_trap_trace = false;
+        for _ in 0..4 {
+            core.step_cycle(&mut bus)
+                .expect("pipeline cycle should work");
+            observed_trap_flush |= core.last_trace().flush_reason == Some(FlushReason::Trap);
+            observed_trap_trace |= core.last_trace().trap.is_some();
+        }
+
+        assert!(observed_trap_flush);
+        assert_eq!(core.stats().trap_count, 1);
+        assert_eq!(core.stats().trap_flushes, 1);
+        assert!(observed_trap_trace);
     }
 
     fn encode_add(rd: u8, rs1: u8, rs2: u8) -> u32 {

@@ -16,7 +16,6 @@ pub struct ExecuteOutcome {
 pub enum ExecuteEvent {
     Advance(ExecuteOutcome),
     Trap(Trap),
-    ReturnFromTrap,
 }
 
 /// Return whether the decoded instruction reads memory in the MEM stage.
@@ -52,7 +51,12 @@ pub fn writes_back(decoded: DecodedInstruction) -> bool {
 
 /// Execute one instruction using forwarded operands.
 #[must_use]
-pub fn execute(decoded: DecodedInstruction, rs1_value: u32, rs2_value: u32) -> ExecuteEvent {
+pub fn execute(
+    decoded: DecodedInstruction,
+    rs1_value: u32,
+    rs2_value: u32,
+    mepc: u32,
+) -> ExecuteEvent {
     let next_pc = decoded.pc.wrapping_add(4);
 
     match decoded.kind {
@@ -120,7 +124,12 @@ pub fn execute(decoded: DecodedInstruction, rs1_value: u32, rs2_value: u32) -> E
         InstructionKind::System(SystemKind::Ebreak) => {
             ExecuteEvent::Trap(Trap::Exception(Exception::Breakpoint))
         }
-        InstructionKind::System(SystemKind::Mret) => ExecuteEvent::ReturnFromTrap,
+        InstructionKind::System(SystemKind::Mret) => ExecuteEvent::Advance(ExecuteOutcome {
+            writeback_value: None,
+            memory_address: None,
+            store_value: 0,
+            next_pc: mepc,
+        }),
     }
 }
 
