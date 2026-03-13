@@ -49,6 +49,7 @@ pub enum StoreKind {
 pub enum SystemKind {
     Ecall,
     Ebreak,
+    Mret,
 }
 
 /// High-level decoded instruction kind.

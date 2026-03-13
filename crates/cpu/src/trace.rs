@@ -8,6 +8,7 @@ pub struct PipelineTrace {
     pub memory_pc: Option<u32>,
     pub writeback_pc: Option<u32>,
     pub retired_instructions: u64,
+    pub predicted_taken: bool,
     pub fetch_stalled: bool,
     pub decode_stalled: bool,
     pub flushed: bool,

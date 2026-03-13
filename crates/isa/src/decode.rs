@@ -214,6 +214,7 @@ fn decode_system(raw: u32) -> Result<SystemKind, DecodeError> {
     match raw {
         0x0000_0073 => Ok(SystemKind::Ecall),
         0x0010_0073 => Ok(SystemKind::Ebreak),
+        0x3020_0073 => Ok(SystemKind::Mret),
         _ => Err(DecodeError::new(raw)),
     }
 }
@@ -255,7 +256,7 @@ const fn imm_j(raw: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::decode;
-    use crate::{AluOp, opcode::InstructionKind};
+    use crate::{AluOp, SystemKind, opcode::InstructionKind};
 
     #[test]
     fn decode_addi() {
@@ -271,5 +272,11 @@ mod tests {
         let decoded = decode(0x0032_2023, 0).expect("sw should decode");
         assert_eq!(decoded.rs1, Some(4));
         assert_eq!(decoded.rs2, Some(3));
+    }
+
+    #[test]
+    fn decode_mret() {
+        let decoded = decode(0x3020_0073, 0).expect("mret should decode");
+        assert_eq!(decoded.kind, InstructionKind::System(SystemKind::Mret));
     }
 }

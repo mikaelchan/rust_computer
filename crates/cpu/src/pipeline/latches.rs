@@ -6,6 +6,7 @@ pub struct IfIdPayload {
     pub pc: u32,
     pub raw: u32,
     pub predicted_pc: u32,
+    pub predicted_taken: bool,
 }
 
 /// IF/ID latch state.
@@ -21,6 +22,7 @@ pub struct IdExPayload {
     pub rs1_value: u32,
     pub rs2_value: u32,
     pub predicted_pc: u32,
+    pub predicted_taken: bool,
 }
 
 /// ID/EX latch state.

@@ -1,13 +1,64 @@
 use rvsim_system::{Bus, BusError};
 
-use crate::pipeline::latches::IfIdPayload;
+use crate::{
+    pipeline::latches::IfIdPayload,
+    predictor::{BranchPrediction, BranchPredictor},
+};
 
 /// Fetch one instruction from the unified memory bus.
-pub fn fetch(bus: &mut dyn Bus, pc: u32, predicted_pc: u32) -> Result<IfIdPayload, BusError> {
+pub fn fetch<P>(bus: &mut dyn Bus, pc: u32, predictor: &P) -> Result<IfIdPayload, BusError>
+where
+    P: BranchPredictor + ?Sized,
+{
     let raw = bus.load32(u64::from(pc))?;
+    let prediction = predict_from_raw(pc, raw, predictor);
     Ok(IfIdPayload {
         pc,
         raw,
-        predicted_pc,
+        predicted_pc: prediction.target,
+        predicted_taken: prediction.taken,
     })
+}
+
+fn predict_from_raw<P>(pc: u32, raw: u32, predictor: &P) -> BranchPrediction
+where
+    P: BranchPredictor + ?Sized,
+{
+    let fallthrough = pc.wrapping_add(4);
+
+    match raw & 0x7f {
+        0x63 => {
+            let target = pc.wrapping_add_signed(imm_b(raw));
+            predictor.predict(pc, fallthrough, target)
+        }
+        0x6f => BranchPrediction {
+            taken: true,
+            target: pc.wrapping_add_signed(imm_j(raw)),
+        },
+        _ => BranchPrediction {
+            taken: false,
+            target: fallthrough,
+        },
+    }
+}
+
+const fn sign_extend(value: u32, bits: u32) -> i32 {
+    let shift = 32 - bits;
+    ((value << shift) as i32) >> shift
+}
+
+const fn imm_b(raw: u32) -> i32 {
+    let imm = (((raw >> 8) & 0x0f) << 1)
+        | (((raw >> 25) & 0x3f) << 5)
+        | (((raw >> 7) & 0x01) << 11)
+        | (((raw >> 31) & 0x01) << 12);
+    sign_extend(imm, 13)
+}
+
+const fn imm_j(raw: u32) -> i32 {
+    let imm = (((raw >> 21) & 0x03ff) << 1)
+        | (((raw >> 20) & 0x0001) << 11)
+        | (((raw >> 12) & 0x00ff) << 12)
+        | (((raw >> 31) & 0x0001) << 20);
+    sign_extend(imm, 21)
 }

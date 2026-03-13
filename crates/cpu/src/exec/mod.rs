@@ -5,8 +5,7 @@ pub mod branch;
 pub mod load_store;
 
 use rvsim_isa::{
-    CsrAddress, DecodedInstruction, Exception, LoadKind, StoreKind, SystemKind, Trap,
-    opcode::InstructionKind,
+    DecodedInstruction, Exception, LoadKind, StoreKind, SystemKind, Trap, opcode::InstructionKind,
 };
 use rvsim_system::{Bus, BusError};
 
@@ -144,6 +143,9 @@ pub fn execute_decoded(
                 current_pc,
             ));
         }
+        InstructionKind::System(SystemKind::Mret) => {
+            return Ok(return_from_trap(state));
+        }
     }
 
     Ok(ExecutionResult {
@@ -155,17 +157,26 @@ pub fn execute_decoded(
 
 /// Apply a trap to machine CSRs and redirect the hart to `mtvec`.
 pub fn apply_trap(state: &mut HartState, trap: Trap, current_pc: u32) -> ExecutionResult {
-    state.csrs.write(CsrAddress::Mepc, current_pc);
-    state.csrs.write(CsrAddress::Mcause, trap.mcause());
-    state.csrs.write(CsrAddress::Mtval, trap.mtval());
+    let trap_vector = state.csrs.enter_trap(trap, current_pc, state.privilege);
     state.privilege = PrivilegeMode::Machine;
-
-    let mtvec = state.csrs.read(CsrAddress::Mtvec) & !0b11;
-    state.pc = mtvec;
+    state.pc = trap_vector;
 
     ExecutionResult {
         retired: 0,
         trap: Some(trap),
+        memory_access: false,
+    }
+}
+
+/// Return from the current machine-mode trap context using `mepc`.
+pub fn return_from_trap(state: &mut HartState) -> ExecutionResult {
+    let (privilege, next_pc) = state.csrs.return_from_trap();
+    state.privilege = privilege;
+    state.pc = next_pc;
+
+    ExecutionResult {
+        retired: 1,
+        trap: None,
         memory_access: false,
     }
 }

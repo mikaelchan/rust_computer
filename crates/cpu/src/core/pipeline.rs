@@ -3,7 +3,7 @@ use rvsim_system::{Bus, BusError, CpuCycle, Processor, SimComponent};
 
 use crate::{
     core::{CpuError, CpuModel},
-    exec::{ExecutionResult, apply_trap},
+    exec::{ExecutionResult, apply_trap, return_from_trap},
     hazard::{
         control::detect_branch_flush,
         data::detect_raw_hazard,
@@ -17,7 +17,7 @@ use crate::{
         mem_stage::{self, MemoryEvent},
         wb_stage,
     },
-    predictor::{AlwaysNotTaken, BranchPredictor},
+    predictor::{BimodalPredictor, BranchPredictor},
     state::HartState,
     trace::PipelineTrace,
 };
@@ -28,7 +28,7 @@ pub struct PipelineCore {
     reset_vector: u32,
     cycle: u64,
     state: HartState,
-    predictor: AlwaysNotTaken,
+    predictor: BimodalPredictor,
     latches: PipelineLatches,
     structural_hazards: StructuralHazardPolicy,
     last_trace: PipelineTrace,
@@ -42,7 +42,7 @@ impl PipelineCore {
             reset_vector,
             cycle: 0,
             state: HartState::new(reset_vector),
-            predictor: AlwaysNotTaken,
+            predictor: BimodalPredictor::default(),
             latches: PipelineLatches::default(),
             structural_hazards: StructuralHazardPolicy::default(),
             last_trace: PipelineTrace::default(),
@@ -131,6 +131,7 @@ impl Processor for PipelineCore {
             self.last_trace = PipelineTrace {
                 cycle: self.cycle,
                 note: "halted",
+                predicted_taken: false,
                 fetch_stalled: true,
                 ..PipelineTrace::default()
             };
@@ -154,6 +155,7 @@ impl Processor for PipelineCore {
         let mut flushed = false;
         let mut note = "progress";
         let mut fetched_pc = None;
+        let mut predicted_taken = false;
         let mut trap_result = None;
 
         if let Some(payload) = current.mem_wb.payload {
@@ -225,6 +227,12 @@ impl Processor for PipelineCore {
                         flushed = true;
                         note = "execute trap";
                     }
+                    ExecuteEvent::ReturnFromTrap => {
+                        trap_result = Some(return_from_trap(&mut self.state));
+                        next_fetch_pc = self.state.pc;
+                        flushed = true;
+                        note = "mret";
+                    }
                 }
             }
         }
@@ -258,6 +266,7 @@ impl Processor for PipelineCore {
                                     .registers
                                     .read(decoded.rs2.unwrap_or_default()),
                                 predicted_pc: payload.predicted_pc,
+                                predicted_taken: payload.predicted_taken,
                             });
                         }
                     }
@@ -282,17 +291,15 @@ impl Processor for PipelineCore {
             next.id_ex.payload = None;
         } else if !decode_stalled && !fetch_stalled {
             let fetch_pc = next_fetch_pc;
-            let prediction = self.predictor.predict(
-                fetch_pc,
-                fetch_pc.wrapping_add(4),
-                fetch_pc.wrapping_add(4),
-            );
-
-            match fetch(bus, fetch_pc, prediction.target) {
+            match fetch(bus, fetch_pc, &self.predictor) {
                 Ok(payload) => {
                     fetched_pc = Some(payload.pc);
+                    predicted_taken = payload.predicted_taken;
                     next.if_id.payload = Some(payload);
                     next_fetch_pc = payload.predicted_pc;
+                    if payload.predicted_taken && note == "progress" {
+                        note = "predicted taken";
+                    }
                 }
                 Err(BusError::MisalignedAccess { .. }) => {
                     trap_result = Some(apply_trap(
@@ -311,7 +318,7 @@ impl Processor for PipelineCore {
 
         self.state.pc = next_fetch_pc;
         self.latches = next;
-        self.last_result = trap_result.unwrap_or(ExecutionResult {
+        let mut result = trap_result.unwrap_or(ExecutionResult {
             retired: retired_instructions,
             trap: None,
             memory_access: current
@@ -320,6 +327,8 @@ impl Processor for PipelineCore {
                 .map(|payload| ex_stage::uses_memory(payload.decoded))
                 .unwrap_or(false),
         });
+        result.retired = retired_instructions;
+        self.last_result = result;
         self.last_trace = PipelineTrace {
             cycle: self.cycle,
             fetched_pc,
@@ -328,6 +337,7 @@ impl Processor for PipelineCore {
             memory_pc,
             writeback_pc,
             retired_instructions,
+            predicted_taken,
             fetch_stalled,
             decode_stalled,
             flushed,
@@ -456,6 +466,52 @@ mod tests {
         assert_eq!(core.hart_state().registers.read(3), 7);
     }
 
+    #[test]
+    fn trains_bimodal_predictor_on_taken_branches() {
+        let mut bus = TestBus::new(128);
+        bus.load_program(&[
+            encode_addi(1, 0, 3),
+            encode_addi(1, 1, -1),
+            encode_bne(1, 0, -4),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        let mut observed_predicted_taken = false;
+        for _ in 0..16 {
+            core.step_cycle(&mut bus)
+                .expect("pipeline cycle should work");
+            observed_predicted_taken |= core.last_trace().predicted_taken;
+        }
+
+        assert!(observed_predicted_taken);
+        assert_eq!(core.hart_state().registers.read(1), 0);
+    }
+
+    #[test]
+    fn mret_restores_execution_from_mepc() {
+        let mut bus = TestBus::new(128);
+        bus.load_program(&[
+            0x3020_0073,
+            encode_addi(1, 0, 99),
+            encode_addi(2, 0, 7),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mepc, 8);
+
+        for _ in 0..10 {
+            core.step_cycle(&mut bus)
+                .expect("pipeline cycle should work");
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().registers.read(2), 7);
+    }
+
     fn encode_add(rd: u8, rs1: u8, rs2: u8) -> u32 {
         encode_r(0b0000000, rs2, rs1, 0b000, rd, 0b0110011)
     }
@@ -480,12 +536,27 @@ mod tests {
     }
 
     fn encode_beq(rs1: u8, rs2: u8, imm: i16) -> u32 {
+        encode_b(rs1, rs2, imm, 0b000)
+    }
+
+    fn encode_bne(rs1: u8, rs2: u8, imm: i16) -> u32 {
+        encode_b(rs1, rs2, imm, 0b001)
+    }
+
+    fn encode_b(rs1: u8, rs2: u8, imm: i16, funct3: u32) -> u32 {
         let imm = imm as u16 as u32;
         let bit12 = ((imm >> 12) & 0x1) << 31;
         let bit11 = ((imm >> 11) & 0x1) << 7;
         let bits10_5 = ((imm >> 5) & 0x3f) << 25;
         let bits4_1 = ((imm >> 1) & 0x0f) << 8;
-        bit12 | bits10_5 | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | bits4_1 | bit11 | 0b1100011
+        bit12
+            | bits10_5
+            | ((rs2 as u32) << 20)
+            | ((rs1 as u32) << 15)
+            | (funct3 << 12)
+            | bits4_1
+            | bit11
+            | 0b1100011
     }
 
     fn encode_jal(rd: u8, imm: i32) -> u32 {

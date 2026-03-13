@@ -16,6 +16,7 @@ pub struct ExecuteOutcome {
 pub enum ExecuteEvent {
     Advance(ExecuteOutcome),
     Trap(Trap),
+    ReturnFromTrap,
 }
 
 /// Return whether the decoded instruction reads memory in the MEM stage.
@@ -119,6 +120,7 @@ pub fn execute(decoded: DecodedInstruction, rs1_value: u32, rs2_value: u32) -> E
         InstructionKind::System(SystemKind::Ebreak) => {
             ExecuteEvent::Trap(Trap::Exception(Exception::Breakpoint))
         }
+        InstructionKind::System(SystemKind::Mret) => ExecuteEvent::ReturnFromTrap,
     }
 }
 
