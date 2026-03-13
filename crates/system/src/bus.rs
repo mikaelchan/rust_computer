@@ -5,6 +5,13 @@ use core::fmt;
 /// Physical address used across the computer model.
 pub type Address = u64;
 
+/// Interrupt lines exposed by memory-mapped devices to the CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptLine {
+    MachineTimer,
+    MachineExternal,
+}
+
 /// A half-open physical address range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddressRange {
@@ -66,6 +73,10 @@ pub trait Addressable {
     fn address_range(&self) -> AddressRange;
 
     fn reset(&mut self) {}
+    fn tick(&mut self) {}
+    fn pending_interrupt(&self) -> Option<InterruptLine> {
+        None
+    }
 
     fn load8(&mut self, addr: Address) -> Result<u8, BusError>;
     fn store8(&mut self, addr: Address, value: u8) -> Result<(), BusError>;
@@ -75,6 +86,10 @@ pub trait Addressable {
 pub trait Bus {
     fn load8(&mut self, addr: Address) -> Result<u8, BusError>;
     fn store8(&mut self, addr: Address, value: u8) -> Result<(), BusError>;
+    fn tick(&mut self) {}
+    fn pending_interrupt(&self) -> Option<InterruptLine> {
+        None
+    }
 
     fn load16(&mut self, addr: Address) -> Result<u16, BusError> {
         if addr % 2 != 0 {

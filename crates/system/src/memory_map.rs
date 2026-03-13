@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use crate::bus::{Address, AddressRange, Addressable, Bus, BusError};
+use crate::bus::{Address, AddressRange, Addressable, Bus, BusError, InterruptLine};
 
 struct DeviceSlot {
     range: AddressRange,
@@ -71,6 +71,18 @@ impl Bus for MemoryMap {
             .ok_or(BusError::UnmappedAddress { addr })?
             .device
             .store8(addr, value)
+    }
+
+    fn tick(&mut self) {
+        for slot in &mut self.devices {
+            slot.device.tick();
+        }
+    }
+
+    fn pending_interrupt(&self) -> Option<InterruptLine> {
+        self.devices
+            .iter()
+            .find_map(|slot| slot.device.pending_interrupt())
     }
 }
 

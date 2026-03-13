@@ -1,4 +1,5 @@
 use rvsim_isa::{CsrAddress, Trap};
+use rvsim_system::InterruptLine;
 
 use super::PrivilegeMode;
 
@@ -6,15 +7,20 @@ const MSTATUS_MIE: u32 = 1 << 3;
 const MSTATUS_MPIE: u32 = 1 << 7;
 const MSTATUS_MPP_SHIFT: u32 = 11;
 const MSTATUS_MPP_MASK: u32 = 0b11 << MSTATUS_MPP_SHIFT;
+const MIE_MTIE: u32 = 1 << 7;
+const MIP_MTIP: u32 = 1 << 7;
 
 /// Machine-mode CSR values required by the first milestone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MachineCsrs {
     pub mstatus: u32,
+    pub mie: u32,
     pub mtvec: u32,
+    pub mcycle: u32,
     pub mepc: u32,
     pub mcause: u32,
     pub mtval: u32,
+    pub mip: u32,
 }
 
 /// Storage wrapper for CSR reads and writes.
@@ -28,26 +34,51 @@ impl CsrFile {
     pub fn read(&self, address: CsrAddress) -> u32 {
         match address {
             CsrAddress::Mstatus => self.machine.mstatus,
+            CsrAddress::Mie => self.machine.mie,
             CsrAddress::Mtvec => self.machine.mtvec,
+            CsrAddress::Mcycle => self.machine.mcycle,
             CsrAddress::Mepc => self.machine.mepc,
             CsrAddress::Mcause => self.machine.mcause,
             CsrAddress::Mtval => self.machine.mtval,
+            CsrAddress::Mip => self.machine.mip,
         }
     }
 
     pub fn write(&mut self, address: CsrAddress, value: u32) {
         match address {
             CsrAddress::Mstatus => self.machine.mstatus = value,
+            CsrAddress::Mie => self.machine.mie = value,
             CsrAddress::Mtvec => self.machine.mtvec = value,
+            CsrAddress::Mcycle => self.machine.mcycle = value,
             CsrAddress::Mepc => self.machine.mepc = value,
             CsrAddress::Mcause => self.machine.mcause = value,
             CsrAddress::Mtval => self.machine.mtval = value,
+            CsrAddress::Mip => self.machine.mip = value,
         }
     }
 
     #[must_use]
     pub fn machine(&self) -> &MachineCsrs {
         &self.machine
+    }
+
+    pub fn increment_cycle(&mut self) {
+        self.machine.mcycle = self.machine.mcycle.wrapping_add(1);
+    }
+
+    pub fn sync_interrupt_line(&mut self, interrupt: Option<InterruptLine>) {
+        self.machine.mip &= !MIP_MTIP;
+
+        if matches!(interrupt, Some(InterruptLine::MachineTimer)) {
+            self.machine.mip |= MIP_MTIP;
+        }
+    }
+
+    #[must_use]
+    pub fn machine_timer_interrupt_enabled(&self) -> bool {
+        (self.machine.mstatus & MSTATUS_MIE) != 0
+            && (self.machine.mie & MIE_MTIE) != 0
+            && (self.machine.mip & MIP_MTIP) != 0
     }
 
     /// Record machine-mode trap state and return the handler PC derived from `mtvec`.

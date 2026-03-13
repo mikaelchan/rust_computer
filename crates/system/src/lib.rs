@@ -6,7 +6,7 @@ pub mod component;
 pub mod machine;
 pub mod memory_map;
 
-pub use bus::{Address, AddressRange, Addressable, Bus, BusError};
+pub use bus::{Address, AddressRange, Addressable, Bus, BusError, InterruptLine};
 pub use clock::Clock;
 pub use component::{CpuCycle, Processor, SimComponent};
 pub use machine::Machine;

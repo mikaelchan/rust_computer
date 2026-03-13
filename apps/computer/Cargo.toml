@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 rvsim-cpu = { path = "../../crates/cpu" }
 rvsim-devices = { path = "../../crates/devices" }
+rvsim-isa = { path = "../../crates/isa" }
 rvsim-system = { path = "../../crates/system" }
 
 [[bin]]

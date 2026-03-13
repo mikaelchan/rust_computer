@@ -1,6 +1,6 @@
 //! Top-level machine wrapper that ties a processor to a memory map.
 
-use crate::{Clock, CpuCycle, MemoryMap, Processor};
+use crate::{Bus, Clock, CpuCycle, MemoryMap, Processor};
 
 /// A single-core von Neumann machine with one processor and a unified address space.
 #[derive(Debug)]
@@ -30,6 +30,7 @@ where
     }
 
     pub fn step_cycle(&mut self) -> Result<CpuCycle, P::Error> {
+        self.bus.tick();
         let result = self.cpu.step_cycle(&mut self.bus)?;
         self.clock.tick();
         Ok(result)

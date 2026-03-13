@@ -9,6 +9,9 @@ rust-version.workspace = true
 rvsim-isa = { path = "../isa" }
 rvsim-system = { path = "../system" }
 
+[dev-dependencies]
+rvsim-devices = { path = "../devices" }
+
 [lib]
 name = "rvsim_cpu"
 path = "src/lib.rs"

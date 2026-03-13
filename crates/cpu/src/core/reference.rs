@@ -64,8 +64,23 @@ impl Processor for ReferenceCore {
 
     fn step_cycle(&mut self, bus: &mut dyn Bus) -> Result<CpuCycle, Self::Error> {
         self.cycle += 1;
+        self.state.csrs.increment_cycle();
+        self.state.csrs.sync_interrupt_line(bus.pending_interrupt());
 
         if self.state.halted {
+            return Ok(CpuCycle {
+                retired_instructions: 0,
+                stalled: true,
+            });
+        }
+
+        if self.state.csrs.machine_timer_interrupt_enabled() {
+            let current_pc = self.state.pc;
+            self.last_result = apply_trap(
+                &mut self.state,
+                Trap::Interrupt(rvsim_isa::Interrupt::MachineTimer),
+                current_pc,
+            );
             return Ok(CpuCycle {
                 retired_instructions: 0,
                 stalled: true,
@@ -115,7 +130,9 @@ impl Processor for ReferenceCore {
 
 #[cfg(test)]
 mod tests {
-    use rvsim_system::{AddressRange, Bus, Processor};
+    use rvsim_devices::{MachineTimer, Rom};
+    use rvsim_system::{AddressRange, Bus, InterruptLine, Processor};
+    use rvsim_system::{Machine, MemoryMap};
 
     use super::ReferenceCore;
     use crate::core::CpuModel;
@@ -143,6 +160,25 @@ mod tests {
         fn store8(&mut self, addr: u64, value: u8) -> Result<(), rvsim_system::BusError> {
             self.bytes[addr as usize] = value;
             Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct InterruptBus {
+        pending_interrupt: Option<InterruptLine>,
+    }
+
+    impl Bus for InterruptBus {
+        fn load8(&mut self, _addr: u64) -> Result<u8, rvsim_system::BusError> {
+            Ok(0)
+        }
+
+        fn store8(&mut self, _addr: u64, _value: u8) -> Result<(), rvsim_system::BusError> {
+            Ok(())
+        }
+
+        fn pending_interrupt(&self) -> Option<InterruptLine> {
+            self.pending_interrupt
         }
     }
 
@@ -176,11 +212,123 @@ mod tests {
         assert_eq!(state.csrs.read(rvsim_isa::CsrAddress::Mtvec), 7);
     }
 
+    #[test]
+    fn takes_machine_timer_interrupt_when_enabled() {
+        let mut bus = InterruptBus {
+            pending_interrupt: Some(InterruptLine::MachineTimer),
+        };
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 7);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x40);
+
+        let report = core
+            .step_cycle(&mut bus)
+            .expect("interrupt cycle should work");
+
+        assert_eq!(report.retired_instructions, 0);
+        assert_eq!(core.hart_state().pc, 0x40);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            (1_u32 << 31) | 7
+        );
+    }
+
+    #[test]
+    fn machine_timer_device_interrupts_through_machine_wrapper() {
+        const TIMER_BASE: u64 = 0x3000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Rom::from_words(
+                0,
+                &[
+                    encode_jal(0, 0),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    encode_addi(10, 0, 1),
+                    encode_jal(0, 0),
+                ],
+            ))
+            .expect("rom should map");
+        memory
+            .map_device(MachineTimer::new(TIMER_BASE))
+            .expect("timer should map");
+
+        let mut machine = Machine::new(ReferenceCore::new(0), memory);
+        machine
+            .bus_mut()
+            .store32(TIMER_BASE + 8, 1)
+            .expect("mtimecmp low should write");
+        machine
+            .bus_mut()
+            .store32(TIMER_BASE + 12, 0)
+            .expect("mtimecmp high should write");
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 7);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        machine.step_cycle().expect("interrupt should be taken");
+        machine
+            .step_cycle()
+            .expect("handler instruction should run");
+
+        assert_eq!(machine.cpu().hart_state().pc, 0x24);
+        assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+        assert_eq!(
+            machine
+                .cpu()
+                .hart_state()
+                .csrs
+                .read(rvsim_isa::CsrAddress::Mcause),
+            (1_u32 << 31) | 7
+        );
+    }
+
     fn encode_csrrwi(rd: u8, csr: u16, zimm: u8) -> u32 {
         ((csr as u32) << 20)
             | ((zimm as u32) << 15)
             | (0b101 << 12)
             | ((rd as u32) << 7)
             | 0b1110011
+    }
+
+    fn encode_addi(rd: u8, rs1: u8, imm: i16) -> u32 {
+        (((imm as u16 as u32) & 0x0fff) << 20)
+            | ((rs1 as u32) << 15)
+            | ((rd as u32) << 7)
+            | 0b0010011
+    }
+
+    fn encode_jal(rd: u8, imm: i32) -> u32 {
+        let imm = imm as u32;
+        let bit20 = ((imm >> 20) & 0x1) << 31;
+        let bits10_1 = ((imm >> 1) & 0x03ff) << 21;
+        let bit11 = ((imm >> 11) & 0x1) << 20;
+        let bits19_12 = ((imm >> 12) & 0xff) << 12;
+        bit20 | bits19_12 | bit11 | bits10_1 | ((rd as u32) << 7) | 0b1101111
     }
 }

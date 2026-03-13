@@ -151,6 +151,8 @@ impl Processor for PipelineCore {
     fn step_cycle(&mut self, bus: &mut dyn Bus) -> Result<CpuCycle, Self::Error> {
         self.cycle += 1;
         self.stats.cycles += 1;
+        self.state.csrs.increment_cycle();
+        self.state.csrs.sync_interrupt_line(bus.pending_interrupt());
 
         if self.state.halted {
             self.stats.fetch_stall_cycles += 1;
@@ -192,22 +194,37 @@ impl Processor for PipelineCore {
             retired_instructions += 1;
         }
 
-        if let Some(payload) = current.ex_mem.payload {
-            fetch_stalled = fetch_blocked_by_memory_access(
-                self.structural_hazards.unified_memory,
-                ex_stage::uses_memory(payload.decoded),
-            );
+        if self.state.csrs.machine_timer_interrupt_enabled() {
+            let current_pc = self.state.pc;
+            trap_result = Some(apply_trap(
+                &mut self.state,
+                Trap::Interrupt(rvsim_isa::Interrupt::MachineTimer),
+                current_pc,
+            ));
+            next_front_end_pc = self.state.pc;
+            flushed = true;
+            flush_reason = Some(FlushReason::Trap);
+            note = "interrupt";
+        }
 
-            match mem_stage::access(bus, payload)? {
-                MemoryEvent::Advance(payload) => {
-                    next.mem_wb.payload = Some(payload);
-                }
-                MemoryEvent::Trap(trap) => {
-                    trap_result = Some(apply_trap(&mut self.state, trap, payload.decoded.pc));
-                    next_front_end_pc = self.state.pc;
-                    flushed = true;
-                    flush_reason = Some(FlushReason::Trap);
-                    note = "memory trap";
+        if !flushed {
+            if let Some(payload) = current.ex_mem.payload {
+                fetch_stalled = fetch_blocked_by_memory_access(
+                    self.structural_hazards.unified_memory,
+                    ex_stage::uses_memory(payload.decoded),
+                );
+
+                match mem_stage::access(bus, payload)? {
+                    MemoryEvent::Advance(payload) => {
+                        next.mem_wb.payload = Some(payload);
+                    }
+                    MemoryEvent::Trap(trap) => {
+                        trap_result = Some(apply_trap(&mut self.state, trap, payload.decoded.pc));
+                        next_front_end_pc = self.state.pc;
+                        flushed = true;
+                        flush_reason = Some(FlushReason::Trap);
+                        note = "memory trap";
+                    }
                 }
             }
         }
@@ -457,7 +474,8 @@ impl Processor for PipelineCore {
 
 #[cfg(test)]
 mod tests {
-    use rvsim_system::{Bus, BusError, Processor};
+    use rvsim_devices::{MachineTimer, Rom};
+    use rvsim_system::{Bus, BusError, Machine, MemoryMap, Processor};
 
     use super::PipelineCore;
     use crate::{FlushReason, core::CpuModel};
@@ -729,6 +747,86 @@ mod tests {
         assert_eq!(core.stats().trap_count, 1);
         assert_eq!(core.stats().trap_flushes, 1);
         assert!(observed_trap_trace);
+    }
+
+    #[test]
+    fn takes_precise_machine_timer_interrupt_after_older_commit() {
+        const TIMER_BASE: u64 = 0x3000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Rom::from_words(
+                0,
+                &[
+                    encode_addi(1, 0, 5),
+                    encode_addi(2, 0, 9),
+                    encode_jal(0, 0),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    encode_addi(10, 0, 1),
+                    encode_jal(0, 0),
+                ],
+            ))
+            .expect("rom should map");
+        memory
+            .map_device(MachineTimer::new(TIMER_BASE))
+            .expect("timer should map");
+
+        let mut machine = Machine::new(PipelineCore::new(0), memory);
+        machine
+            .bus_mut()
+            .store32(TIMER_BASE + 8, 5)
+            .expect("mtimecmp low should write");
+        machine
+            .bus_mut()
+            .store32(TIMER_BASE + 12, 0)
+            .expect("mtimecmp high should write");
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 7);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        for _ in 0..12 {
+            machine
+                .step_cycle()
+                .expect("pipeline cycle should work through interrupt");
+        }
+
+        assert_eq!(machine.cpu().hart_state().registers.read(1), 5);
+        assert_eq!(machine.cpu().hart_state().registers.read(2), 0);
+        assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+        assert_eq!(
+            machine
+                .cpu()
+                .hart_state()
+                .csrs
+                .read(rvsim_isa::CsrAddress::Mepc),
+            4
+        );
+        assert_eq!(
+            machine
+                .cpu()
+                .hart_state()
+                .csrs
+                .read(rvsim_isa::CsrAddress::Mcause),
+            (1_u32 << 31) | 7
+        );
+        assert_eq!(machine.cpu().stats().trap_count, 1);
+        assert_eq!(machine.cpu().stats().trap_flushes, 1);
     }
 
     fn encode_add(rd: u8, rs1: u8, rs2: u8) -> u32 {
