@@ -13,11 +13,11 @@ The current baseline already has:
 
 ## Next
 
-- [ ] Add `write-back` data-cache support with dirty lines.
-  This is the highest-priority cache gap. The current cache is still write-through and invalidates on stores, which is too simple for memory hierarchy experiments.
+- [x] Add `write-back` data-cache support with dirty lines.
+  Dirty cache lines can now stay resident and write back on eviction instead of forcing every store through to memory immediately.
 
-- [ ] Add configurable store allocation policy.
-  Support at least `write-allocate` and `no-write-allocate`, then make the D-cache policy explicit in `CacheConfig`.
+- [x] Add configurable store allocation policy.
+  `CacheConfig` now supports both `write-allocate` and `no-write-allocate`.
 
 - [ ] Tighten cacheable-range boundary behavior.
   Today a line is cacheable only when the whole line fits inside a cached physical range. This should become an explicit policy with validation and tests, so short ROM images or partial ranges do not fail unexpectedly.

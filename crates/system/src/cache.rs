@@ -12,6 +12,22 @@ pub enum ReplacementPolicy {
     LeastRecentlyUsed,
 }
 
+/// Store commit policy for cached lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WritePolicy {
+    #[default]
+    WriteThrough,
+    WriteBack,
+}
+
+/// Miss policy for store accesses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StoreAllocationPolicy {
+    #[default]
+    NoWriteAllocate,
+    WriteAllocate,
+}
+
 /// Static cache geometry and address policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheConfig {
@@ -19,6 +35,8 @@ pub struct CacheConfig {
     line_size: usize,
     associativity: usize,
     replacement_policy: ReplacementPolicy,
+    write_policy: WritePolicy,
+    store_allocation_policy: StoreAllocationPolicy,
     cached_ranges: Vec<AddressRange>,
 }
 
@@ -31,6 +49,8 @@ impl CacheConfig {
             line_size: WORD_BYTES,
             associativity: 1,
             replacement_policy: ReplacementPolicy::RoundRobin,
+            write_policy: WritePolicy::WriteThrough,
+            store_allocation_policy: StoreAllocationPolicy::NoWriteAllocate,
             cached_ranges,
         }
     }
@@ -66,6 +86,21 @@ impl CacheConfig {
     }
 
     #[must_use]
+    pub fn with_write_policy(mut self, write_policy: WritePolicy) -> Self {
+        self.write_policy = write_policy;
+        self
+    }
+
+    #[must_use]
+    pub fn with_store_allocation_policy(
+        mut self,
+        store_allocation_policy: StoreAllocationPolicy,
+    ) -> Self {
+        self.store_allocation_policy = store_allocation_policy;
+        self
+    }
+
+    #[must_use]
     pub fn line_count(&self) -> usize {
         self.line_count
     }
@@ -91,6 +126,16 @@ impl CacheConfig {
     }
 
     #[must_use]
+    pub fn write_policy(&self) -> WritePolicy {
+        self.write_policy
+    }
+
+    #[must_use]
+    pub fn store_allocation_policy(&self) -> StoreAllocationPolicy {
+        self.store_allocation_policy
+    }
+
+    #[must_use]
     pub fn cached_ranges(&self) -> &[AddressRange] {
         &self.cached_ranges
     }
@@ -108,6 +153,7 @@ pub struct CacheStats {
     pub read_misses: u64,
     pub refills: u64,
     pub evictions: u64,
+    pub write_backs: u64,
     pub write_accesses: u64,
     pub invalidations: u64,
 }
@@ -122,6 +168,7 @@ pub struct SplitCacheStats {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CacheLine {
     valid: bool,
+    dirty: bool,
     tag: u64,
     words: Box<[u32]>,
     last_used: u64,
@@ -131,6 +178,7 @@ impl CacheLine {
     fn new(words_per_line: usize) -> Self {
         Self {
             valid: false,
+            dirty: false,
             tag: 0,
             words: vec![0; words_per_line].into_boxed_slice(),
             last_used: 0,
@@ -139,6 +187,7 @@ impl CacheLine {
 
     fn reset(&mut self) {
         self.valid = false;
+        self.dirty = false;
         self.tag = 0;
         self.last_used = 0;
         self.words.fill(0);
@@ -186,6 +235,59 @@ struct DecodedAddress {
     word_index: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StoreOp {
+    addr: Address,
+    width: usize,
+    value: u32,
+}
+
+impl StoreOp {
+    fn to_bytes(self) -> [u8; WORD_BYTES] {
+        self.value.to_le_bytes()
+    }
+
+    fn apply(self, line_base: Address, words: &mut [u32]) {
+        let word_index = ((self.addr - line_base) as usize) / WORD_BYTES;
+        let byte_offset = ((self.addr - line_base) as usize) % WORD_BYTES;
+        let mut word_bytes = words[word_index].to_le_bytes();
+        let store_bytes = self.to_bytes();
+
+        word_bytes[byte_offset..byte_offset + self.width]
+            .copy_from_slice(&store_bytes[..self.width]);
+        words[word_index] = u32::from_le_bytes(word_bytes);
+    }
+
+    fn commit<B>(self, inner: &mut B) -> Result<(), BusError>
+    where
+        B: Bus,
+    {
+        match self.width {
+            1 => inner.store8(self.addr, self.value as u8),
+            2 => inner.store16(self.addr, self.value as u16),
+            4 => inner.store32(self.addr, self.value),
+            _ => unreachable!("unsupported store width"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingWriteBack {
+    line_base: Address,
+    next_word_index: usize,
+    words: Box<[u32]>,
+}
+
+impl PendingWriteBack {
+    fn new(line_base: Address, words: &[u32]) -> Self {
+        Self {
+            line_base,
+            next_word_index: 0,
+            words: words.to_vec().into_boxed_slice(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingRefill {
     line_base: Address,
@@ -216,9 +318,17 @@ impl PendingRefill {
             kind,
         }
     }
+}
 
-    fn matches(&self, decoded: DecodedAddress, kind: RefillKind) -> bool {
-        self.line_base == decoded.line_base && self.kind == kind
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingLineOp {
+    write_back: Option<PendingWriteBack>,
+    refill: PendingRefill,
+}
+
+impl PendingLineOp {
+    fn matches_line(&self, decoded: DecodedAddress) -> bool {
+        self.refill.line_base == decoded.line_base
     }
 }
 
@@ -227,7 +337,7 @@ struct CacheBank {
     config: CacheConfig,
     sets: Vec<CacheSet>,
     stats: CacheStats,
-    pending_fill: Option<PendingRefill>,
+    pending: Option<PendingLineOp>,
     access_epoch: u64,
 }
 
@@ -244,7 +354,7 @@ impl CacheBank {
             config,
             sets,
             stats: CacheStats::default(),
-            pending_fill: None,
+            pending: None,
             access_epoch: 0,
         }
     }
@@ -254,7 +364,7 @@ impl CacheBank {
             set.reset();
         }
         self.stats = CacheStats::default();
-        self.pending_fill = None;
+        self.pending = None;
         self.access_epoch = 0;
     }
 
@@ -270,8 +380,8 @@ impl CacheBank {
         self.config.line_size / WORD_BYTES
     }
 
-    fn has_pending_fill(&self) -> bool {
-        self.pending_fill.is_some()
+    fn has_pending_activity(&self) -> bool {
+        self.pending.is_some()
     }
 
     fn caches_address(&self, addr: Address) -> bool {
@@ -310,6 +420,11 @@ impl CacheBank {
             tag,
             word_index,
         }
+    }
+
+    fn line_base_for_tag(&self, set_index: usize, tag: u64) -> Address {
+        let line_number = tag * self.config.set_count() as u64 + set_index as u64;
+        line_number * self.config.line_size as u64
     }
 
     fn lookup_way(&self, decoded: DecodedAddress) -> Option<usize> {
@@ -353,61 +468,137 @@ impl CacheBank {
         }
     }
 
-    fn start_refill(&mut self, decoded: DecodedAddress, kind: RefillKind) {
+    fn start_pending(&mut self, decoded: DecodedAddress, kind: RefillKind, count_read_miss: bool) {
         let victim = self.select_victim(decoded.set_index);
-        if self.sets[decoded.set_index].lines[victim].valid {
+        let (victim_valid, victim_dirty, victim_tag, victim_words) = {
+            let line = &self.sets[decoded.set_index].lines[victim];
+            (line.valid, line.dirty, line.tag, line.words.clone())
+        };
+        if victim_valid {
             self.stats.evictions += 1;
         }
-        self.stats.read_misses += 1;
-        self.pending_fill = Some(PendingRefill::new(
-            decoded.line_base,
-            decoded.set_index,
-            decoded.tag,
-            victim,
-            self.line_words(),
-            kind,
-        ));
+
+        let write_back =
+            (self.config.write_policy == WritePolicy::WriteBack && victim_valid && victim_dirty)
+                .then(|| {
+                    PendingWriteBack::new(
+                        self.line_base_for_tag(decoded.set_index, victim_tag),
+                        &victim_words,
+                    )
+                });
+
+        if count_read_miss {
+            self.stats.read_misses += 1;
+        }
+
+        {
+            let line = &mut self.sets[decoded.set_index].lines[victim];
+            line.valid = false;
+            line.dirty = false;
+        }
+
+        self.pending = Some(PendingLineOp {
+            write_back,
+            refill: PendingRefill::new(
+                decoded.line_base,
+                decoded.set_index,
+                decoded.tag,
+                victim,
+                self.line_words(),
+                kind,
+            ),
+        });
     }
 
-    fn continue_refill<B>(&mut self, inner: &mut B) -> Result<(), BusError>
+    fn continue_pending<B>(&mut self, inner: &mut B) -> Result<(), BusError>
     where
         B: Bus,
     {
-        let Some(mut pending) = self.pending_fill.take() else {
+        let Some(mut pending) = self.pending.take() else {
             return Ok(());
         };
 
-        while pending.next_word_index < pending.words.len() {
-            let word_addr = pending.line_base + (pending.next_word_index * WORD_BYTES) as u64;
-            let word = match pending.kind {
+        if let Some(write_back) = &mut pending.write_back {
+            while write_back.next_word_index < write_back.words.len() {
+                let word_addr =
+                    write_back.line_base + (write_back.next_word_index * WORD_BYTES) as u64;
+                match inner.store32(word_addr, write_back.words[write_back.next_word_index]) {
+                    Ok(()) => write_back.next_word_index += 1,
+                    Err(BusError::Busy { remaining_cycles }) => {
+                        self.pending = Some(pending);
+                        return Err(BusError::Busy { remaining_cycles });
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            self.stats.write_backs += 1;
+            pending.write_back = None;
+        }
+
+        while pending.refill.next_word_index < pending.refill.words.len() {
+            let word_addr =
+                pending.refill.line_base + (pending.refill.next_word_index * WORD_BYTES) as u64;
+            let result = match pending.refill.kind {
                 RefillKind::Fetch => inner.fetch32(word_addr),
                 RefillKind::Load => inner.load32(word_addr),
             };
 
-            match word {
+            match result {
                 Ok(word) => {
-                    pending.words[pending.next_word_index] = word;
-                    pending.next_word_index += 1;
+                    pending.refill.words[pending.refill.next_word_index] = word;
+                    pending.refill.next_word_index += 1;
                 }
                 Err(BusError::Busy { remaining_cycles }) => {
-                    self.pending_fill = Some(pending);
+                    self.pending = Some(pending);
                     return Err(BusError::Busy { remaining_cycles });
                 }
-                Err(error) => {
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             }
         }
 
         {
-            let line = &mut self.sets[pending.set_index].lines[pending.way_index];
+            let line = &mut self.sets[pending.refill.set_index].lines[pending.refill.way_index];
             line.valid = true;
-            line.tag = pending.tag;
-            line.words.as_mut().copy_from_slice(&pending.words);
+            line.dirty = false;
+            line.tag = pending.refill.tag;
+            line.words.as_mut().copy_from_slice(&pending.refill.words);
         }
         self.stats.refills += 1;
-        self.touch_line(pending.set_index, pending.way_index);
+        self.touch_line(pending.refill.set_index, pending.refill.way_index);
         Ok(())
+    }
+
+    fn ensure_line<B>(
+        &mut self,
+        inner: &mut B,
+        addr: Address,
+        kind: RefillKind,
+    ) -> Result<(DecodedAddress, usize), BusError>
+    where
+        B: Bus,
+    {
+        let decoded = self.decode(addr);
+
+        if let Some(pending) = &self.pending {
+            if !pending.matches_line(decoded) {
+                return Err(BusError::Busy {
+                    remaining_cycles: 1,
+                });
+            }
+            self.continue_pending(inner)?;
+        }
+
+        if let Some(way_index) = self.lookup_way(decoded) {
+            return Ok((decoded, way_index));
+        }
+
+        self.start_pending(decoded, kind, true);
+        self.continue_pending(inner)?;
+
+        let way_index = self
+            .lookup_way(decoded)
+            .expect("completed refill should install a line");
+        Ok((decoded, way_index))
     }
 
     fn load_word<B>(
@@ -419,33 +610,87 @@ impl CacheBank {
     where
         B: Bus,
     {
-        let decoded = self.decode(addr);
-        if let Some(way_index) = self.lookup_way(decoded) {
-            let word = self.read_word(decoded, way_index);
-            self.stats.read_hits += 1;
-            self.touch_line(decoded.set_index, way_index);
-            return Ok(word);
-        }
-
-        if let Some(pending) = &self.pending_fill {
-            if !pending.matches(decoded, kind) {
-                return Err(BusError::Busy {
-                    remaining_cycles: 1,
-                });
-            }
-        } else {
-            self.start_refill(decoded, kind);
-        }
-
-        self.continue_refill(inner)?;
-        let way_index = self
-            .lookup_way(decoded)
-            .expect("completed refill should install a line");
-        Ok(self.read_word(decoded, way_index))
+        let (decoded, way_index) = self.ensure_line(inner, addr, kind)?;
+        let word = self.read_word(decoded, way_index);
+        self.stats.read_hits += 1;
+        self.touch_line(decoded.set_index, way_index);
+        Ok(word)
     }
 
     fn note_write_access(&mut self) {
         self.stats.write_accesses += 1;
+    }
+
+    fn update_cached_store(
+        &mut self,
+        decoded: DecodedAddress,
+        way_index: usize,
+        store: StoreOp,
+        dirty: bool,
+    ) {
+        let line = &mut self.sets[decoded.set_index].lines[way_index];
+        store.apply(decoded.line_base, line.words.as_mut());
+        line.valid = true;
+        line.tag = decoded.tag;
+        line.dirty = dirty;
+        self.touch_line(decoded.set_index, way_index);
+    }
+
+    fn store<B>(&mut self, inner: &mut B, store: StoreOp) -> Result<(), BusError>
+    where
+        B: Bus,
+    {
+        self.note_write_access();
+
+        if !self.caches_address(store.addr) || !self.caches_line_containing(store.addr) {
+            return store.commit(inner);
+        }
+
+        let decoded = self.decode(store.addr);
+        if let Some(pending) = &self.pending {
+            if !pending.matches_line(decoded) {
+                return Err(BusError::Busy {
+                    remaining_cycles: 1,
+                });
+            }
+            self.continue_pending(inner)?;
+        }
+
+        if let Some(way_index) = self.lookup_way(decoded) {
+            return match self.config.write_policy {
+                WritePolicy::WriteThrough => {
+                    store.commit(inner)?;
+                    self.update_cached_store(decoded, way_index, store, false);
+                    Ok(())
+                }
+                WritePolicy::WriteBack => {
+                    self.update_cached_store(decoded, way_index, store, true);
+                    Ok(())
+                }
+            };
+        }
+
+        match self.config.store_allocation_policy {
+            StoreAllocationPolicy::NoWriteAllocate => store.commit(inner),
+            StoreAllocationPolicy::WriteAllocate => {
+                self.start_pending(decoded, RefillKind::Load, false);
+                self.continue_pending(inner)?;
+
+                let way_index = self
+                    .lookup_way(decoded)
+                    .expect("completed refill should install a line");
+                match self.config.write_policy {
+                    WritePolicy::WriteThrough => {
+                        store.commit(inner)?;
+                        self.update_cached_store(decoded, way_index, store, false);
+                    }
+                    WritePolicy::WriteBack => {
+                        self.update_cached_store(decoded, way_index, store, true);
+                    }
+                }
+                Ok(())
+            }
+        }
     }
 
     fn invalidate_line(&mut self, addr: Address) {
@@ -455,11 +700,11 @@ impl CacheBank {
 
         let decoded = self.decode(addr);
         if self
-            .pending_fill
+            .pending
             .as_ref()
-            .is_some_and(|pending| pending.line_base == decoded.line_base)
+            .is_some_and(|pending| pending.matches_line(decoded))
         {
-            self.pending_fill = None;
+            self.pending = None;
         }
 
         let set = &mut self.sets[decoded.set_index];
@@ -469,12 +714,13 @@ impl CacheBank {
             .find(|line| line.valid && line.tag == decoded.tag)
         {
             line.valid = false;
+            line.dirty = false;
             self.stats.invalidations += 1;
         }
     }
 }
 
-/// A simple write-through unified cache wrapper.
+/// A unified cache wrapper retained for compatibility with earlier milestones.
 #[derive(Debug)]
 pub struct DirectMappedCache<B> {
     inner: B,
@@ -588,25 +834,6 @@ where
     Ok(extract_half(word, addr))
 }
 
-fn store_through<B, F>(
-    instruction: Option<&mut CacheBank>,
-    data: &mut CacheBank,
-    inner: &mut B,
-    addr: Address,
-    store: F,
-) -> Result<(), BusError>
-where
-    B: Bus,
-    F: FnOnce(&mut B, Address) -> Result<(), BusError>,
-{
-    data.note_write_access();
-    data.invalidate_line(addr);
-    if let Some(instruction) = instruction {
-        instruction.invalidate_line(addr);
-    }
-    store(inner, addr)
-}
-
 impl<B> Bus for DirectMappedCache<B>
 where
     B: Bus,
@@ -638,12 +865,13 @@ where
     }
 
     fn store8(&mut self, addr: Address, value: u8) -> Result<(), BusError> {
-        store_through(
-            None,
-            &mut self.bank,
+        self.bank.store(
             &mut self.inner,
-            addr,
-            |inner, address| inner.store8(address, value),
+            StoreOp {
+                addr,
+                width: 1,
+                value: u32::from(value),
+            },
         )
     }
 
@@ -679,12 +907,13 @@ where
             return Err(BusError::MisalignedAccess { addr, width: 2 });
         }
 
-        store_through(
-            None,
-            &mut self.bank,
+        self.bank.store(
             &mut self.inner,
-            addr,
-            |inner, address| inner.store16(address, value),
+            StoreOp {
+                addr,
+                width: 2,
+                value: u32::from(value),
+            },
         )
     }
 
@@ -693,12 +922,13 @@ where
             return Err(BusError::MisalignedAccess { addr, width: 4 });
         }
 
-        store_through(
-            None,
-            &mut self.bank,
+        self.bank.store(
             &mut self.inner,
-            addr,
-            |inner, address| inner.store32(address, value),
+            StoreOp {
+                addr,
+                width: 4,
+                value,
+            },
         )
     }
 
@@ -707,7 +937,7 @@ where
     }
 
     fn is_busy(&self) -> bool {
-        self.bank.has_pending_fill() || self.inner.is_busy()
+        self.bank.has_pending_activity() || self.inner.is_busy()
     }
 
     fn pending_interrupts(&self) -> InterruptSet {
@@ -748,13 +978,16 @@ where
     }
 
     fn store8(&mut self, addr: Address, value: u8) -> Result<(), BusError> {
-        store_through(
-            Some(&mut self.instruction),
-            &mut self.data,
+        self.data.store(
             &mut self.inner,
-            addr,
-            |inner, address| inner.store8(address, value),
-        )
+            StoreOp {
+                addr,
+                width: 1,
+                value: u32::from(value),
+            },
+        )?;
+        self.instruction.invalidate_line(addr);
+        Ok(())
     }
 
     fn load16(&mut self, addr: Address) -> Result<u16, BusError> {
@@ -789,13 +1022,16 @@ where
             return Err(BusError::MisalignedAccess { addr, width: 2 });
         }
 
-        store_through(
-            Some(&mut self.instruction),
-            &mut self.data,
+        self.data.store(
             &mut self.inner,
-            addr,
-            |inner, address| inner.store16(address, value),
-        )
+            StoreOp {
+                addr,
+                width: 2,
+                value: u32::from(value),
+            },
+        )?;
+        self.instruction.invalidate_line(addr);
+        Ok(())
     }
 
     fn store32(&mut self, addr: Address, value: u32) -> Result<(), BusError> {
@@ -803,13 +1039,16 @@ where
             return Err(BusError::MisalignedAccess { addr, width: 4 });
         }
 
-        store_through(
-            Some(&mut self.instruction),
-            &mut self.data,
+        self.data.store(
             &mut self.inner,
-            addr,
-            |inner, address| inner.store32(address, value),
-        )
+            StoreOp {
+                addr,
+                width: 4,
+                value,
+            },
+        )?;
+        self.instruction.invalidate_line(addr);
+        Ok(())
     }
 
     fn tick(&mut self) {
@@ -817,7 +1056,9 @@ where
     }
 
     fn is_busy(&self) -> bool {
-        self.instruction.has_pending_fill() || self.data.has_pending_fill() || self.inner.is_busy()
+        self.instruction.has_pending_activity()
+            || self.data.has_pending_activity()
+            || self.inner.is_busy()
     }
 
     fn pending_interrupts(&self) -> InterruptSet {
@@ -829,7 +1070,10 @@ where
 mod tests {
     use crate::{AccessKind, AddressRange, Addressable, Bus, BusError, MemoryMap};
 
-    use super::{CacheConfig, DirectMappedCache, ReplacementPolicy, SplitL1Cache};
+    use super::{
+        CacheConfig, DirectMappedCache, ReplacementPolicy, SplitL1Cache, StoreAllocationPolicy,
+        WritePolicy,
+    };
 
     #[derive(Debug, Clone)]
     struct WordDevice {
@@ -970,7 +1214,7 @@ mod tests {
             0x0050_0093
         );
         assert_eq!(cache.stats().read_misses, 1);
-        assert_eq!(cache.stats().read_hits, 1);
+        assert_eq!(cache.stats().read_hits, 2);
         assert_eq!(cache.stats().refills, 1);
     }
 
@@ -998,12 +1242,12 @@ mod tests {
             cache.fetch32(12).expect("line neighbor should hit"),
             0x0000_006f
         );
-        assert_eq!(cache.stats().read_hits, 1);
+        assert_eq!(cache.stats().read_hits, 2);
         assert_eq!(cache.stats().read_misses, 1);
     }
 
     #[test]
-    fn unified_cache_invalidates_cached_word_after_store() {
+    fn write_through_store_hit_updates_cached_line() {
         const RAM_BASE: u64 = 0x1000_0000;
 
         let mut memory = MemoryMap::new();
@@ -1028,12 +1272,74 @@ mod tests {
             .store32(RAM_BASE, 9)
             .expect("retry should complete write-through");
 
-        let _ = cache
-            .load32(RAM_BASE)
-            .expect_err("load after invalidation should miss again");
-        cache.tick();
-        assert_eq!(cache.load32(RAM_BASE).expect("refill should succeed"), 9);
-        assert!(cache.stats().invalidations >= 1);
+        assert_eq!(cache.load32(RAM_BASE).expect("updated line should hit"), 9);
+        assert_eq!(retry_load32(cache.inner_mut(), RAM_BASE), 9);
+        assert_eq!(cache.stats().invalidations, 0);
+        assert_eq!(cache.stats().refills, 1);
+    }
+
+    #[test]
+    fn no_write_allocate_store_miss_does_not_fill_cache() {
+        const RAM_BASE: u64 = 0x1000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(WordDevice::new_zeroed(RAM_BASE, 0x1000, 0))
+            .expect("ram should map");
+
+        let mut cache = DirectMappedCache::new(
+            memory,
+            CacheConfig::new(8, vec![crate::AddressRange::new(RAM_BASE, 0x1000)]),
+        );
+
+        cache
+            .store32(RAM_BASE, 7)
+            .expect("cold no-write-allocate store should bypass");
+        assert_eq!(cache.stats().refills, 0);
+        assert_eq!(cache.stats().read_misses, 0);
+
+        assert_eq!(cache.load32(RAM_BASE).expect("first read should refill"), 7);
+        assert_eq!(cache.stats().read_misses, 1);
+        assert_eq!(cache.stats().refills, 1);
+    }
+
+    #[test]
+    fn write_back_write_allocate_delays_memory_update_until_eviction() {
+        const RAM_BASE: u64 = 0x1000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(WordDevice::new_zeroed(RAM_BASE, 0x1000, 0))
+            .expect("ram should map");
+
+        let mut cache = DirectMappedCache::new(
+            memory,
+            CacheConfig::new(1, vec![crate::AddressRange::new(RAM_BASE, 0x1000)])
+                .with_write_policy(WritePolicy::WriteBack)
+                .with_store_allocation_policy(StoreAllocationPolicy::WriteAllocate),
+        );
+
+        retry_store32(&mut cache, RAM_BASE, 9);
+        assert_eq!(retry_load32(&mut cache, RAM_BASE), 9);
+        assert_eq!(
+            cache
+                .inner_mut()
+                .load32(RAM_BASE)
+                .expect("dirty line should not be visible in memory yet"),
+            0
+        );
+
+        retry_store32(&mut cache, RAM_BASE + 4, 11);
+        assert_eq!(
+            cache
+                .inner_mut()
+                .load32(RAM_BASE)
+                .expect("eviction should write dirty line back"),
+            9
+        );
+        assert_eq!(cache.stats().evictions, 1);
+        assert_eq!(cache.stats().write_backs, 1);
+        assert_eq!(cache.stats().refills, 2);
     }
 
     #[test]
@@ -1115,7 +1421,9 @@ mod tests {
             memory,
             CacheConfig::new(8, vec![crate::AddressRange::new(0, 0x1000)]).with_line_size(16),
             CacheConfig::new(8, vec![crate::AddressRange::new(RAM_BASE, 0x1000)])
-                .with_line_size(16),
+                .with_line_size(16)
+                .with_write_policy(WritePolicy::WriteBack)
+                .with_store_allocation_policy(StoreAllocationPolicy::WriteAllocate),
         );
 
         assert_eq!(retry_fetch32(&mut cache, 0), 0x0050_0093);
@@ -1134,10 +1442,10 @@ mod tests {
 
         let stats = cache.stats();
         assert_eq!(stats.instruction.read_misses, 1);
-        assert_eq!(stats.instruction.read_hits, 1);
+        assert_eq!(stats.instruction.read_hits, 2);
         assert_eq!(stats.instruction.refills, 1);
         assert_eq!(stats.data.read_misses, 1);
-        assert_eq!(stats.data.read_hits, 1);
+        assert_eq!(stats.data.read_hits, 2);
         assert_eq!(stats.data.refills, 1);
     }
 

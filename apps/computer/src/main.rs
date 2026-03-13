@@ -3,6 +3,7 @@ use rvsim_devices::{InterruptController, MachineSoftwareInterrupt, Ram, Rom, Sim
 use rvsim_isa::CsrAddress;
 use rvsim_system::{
     AddressRange, Bus, CacheConfig, Machine, MemoryMap, ReplacementPolicy, SplitL1Cache,
+    StoreAllocationPolicy, WritePolicy,
 };
 
 const RESET_VECTOR: u32 = 0x0000_0000;
@@ -43,7 +44,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         CacheConfig::new(64, vec![AddressRange::new(RAM_BASE, 0x1000)])
             .with_line_size(16)
             .with_associativity(2)
-            .with_replacement_policy(ReplacementPolicy::LeastRecentlyUsed),
+            .with_replacement_policy(ReplacementPolicy::LeastRecentlyUsed)
+            .with_write_policy(WritePolicy::WriteBack)
+            .with_store_allocation_policy(StoreAllocationPolicy::WriteAllocate),
     );
 
     let cpu = ReferenceCore::new(RESET_VECTOR);
@@ -122,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         software_mcause
     );
     println!(
-        "cache stats: icache(hits={} misses={} refills={} evictions={} invalidations={}) dcache(hits={} misses={} refills={} evictions={} invalidations={})",
+        "cache stats: icache(hits={} misses={} refills={} evictions={} invalidations={}) dcache(hits={} misses={} refills={} evictions={} write_backs={} invalidations={})",
         machine.bus().stats().instruction.read_hits,
         machine.bus().stats().instruction.read_misses,
         machine.bus().stats().instruction.refills,
@@ -132,6 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         machine.bus().stats().data.read_misses,
         machine.bus().stats().data.refills,
         machine.bus().stats().data.evictions,
+        machine.bus().stats().data.write_backs,
         machine.bus().stats().data.invalidations
     );
 

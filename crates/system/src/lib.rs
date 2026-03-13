@@ -12,6 +12,7 @@ pub use bus::{
 };
 pub use cache::{
     CacheConfig, CacheStats, DirectMappedCache, ReplacementPolicy, SplitCacheStats, SplitL1Cache,
+    StoreAllocationPolicy, WritePolicy,
 };
 pub use clock::Clock;
 pub use component::{CpuCycle, Processor, SimComponent};
