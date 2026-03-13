@@ -3,14 +3,21 @@ use rvsim_system::{Address, AddressRange, Addressable, BusError, InterruptLine, 
 const PENDING_OFFSET: Address = 0;
 const ENABLE_OFFSET: Address = 4;
 const SET_PENDING_OFFSET: Address = 8;
-const CLEAR_PENDING_OFFSET: Address = 12;
+const CLAIM_COMPLETE_OFFSET: Address = 12;
 
 /// A minimal external interrupt controller with 32 software-visible sources.
+///
+/// The `claim/complete` register is modeled as a 32-bit MMIO word even though the
+/// bus currently issues byte accesses. Reads therefore latch one claimed source
+/// ID on the first byte and serve the remaining bytes from that snapshot.
 #[derive(Debug, Clone)]
 pub struct InterruptController {
     range: AddressRange,
     pending: u32,
     enable: u32,
+    claimed: u32,
+    claim_latch: Option<u32>,
+    complete_staging: [u8; 4],
 }
 
 impl InterruptController {
@@ -20,6 +27,9 @@ impl InterruptController {
             range: AddressRange::new(base, 16),
             pending: 0,
             enable: 0,
+            claimed: 0,
+            claim_latch: None,
+            complete_staging: [0; 4],
         }
     }
 
@@ -31,11 +41,49 @@ impl InterruptController {
         Ok(addr - self.range.start)
     }
 
+    fn enabled_pending(&self) -> u32 {
+        self.pending & self.enable
+    }
+
+    fn source_mask(source_id: u32) -> u32 {
+        match source_id {
+            1..=32 => 1_u32 << (source_id - 1),
+            _ => 0,
+        }
+    }
+
+    fn highest_priority_pending_source(&self) -> u32 {
+        let enabled_pending = self.enabled_pending();
+        if enabled_pending == 0 {
+            0
+        } else {
+            enabled_pending.trailing_zeros() + 1
+        }
+    }
+
+    fn claim_next(&mut self) -> u32 {
+        let source_id = self.highest_priority_pending_source();
+        if source_id != 0 {
+            let mask = Self::source_mask(source_id);
+            self.pending &= !mask;
+            self.claimed |= mask;
+        }
+
+        source_id
+    }
+
+    fn complete_source(&mut self, source_id: u32) {
+        self.claimed &= !Self::source_mask(source_id);
+    }
+
     fn read_register_byte(&self, offset: Address) -> u8 {
         let (value, byte_offset) = match offset {
             PENDING_OFFSET..=3 => (self.pending, offset as usize),
             ENABLE_OFFSET..=7 => (self.enable, (offset - 4) as usize),
-            SET_PENDING_OFFSET..=11 | CLEAR_PENDING_OFFSET..=15 => (0, 0),
+            SET_PENDING_OFFSET..=11 => (0, 0),
+            CLAIM_COMPLETE_OFFSET..=15 => {
+                (self.claim_latch.unwrap_or_default(), (offset - 12) as usize)
+            }
             _ => (0, 0),
         };
 
@@ -55,10 +103,13 @@ impl Addressable for InterruptController {
     fn reset(&mut self) {
         self.pending = 0;
         self.enable = 0;
+        self.claimed = 0;
+        self.claim_latch = None;
+        self.complete_staging = [0; 4];
     }
 
     fn pending_interrupts(&self) -> InterruptSet {
-        if (self.pending & self.enable) != 0 {
+        if self.enabled_pending() != 0 {
             InterruptSet::from(InterruptLine::MachineExternal)
         } else {
             InterruptSet::empty()
@@ -67,7 +118,16 @@ impl Addressable for InterruptController {
 
     fn load8(&mut self, addr: Address) -> Result<u8, BusError> {
         let offset = self.offset(addr)?;
-        Ok(self.read_register_byte(offset))
+        if offset == CLAIM_COMPLETE_OFFSET {
+            self.claim_latch = Some(self.claim_next());
+        }
+
+        let value = self.read_register_byte(offset);
+        if offset == CLAIM_COMPLETE_OFFSET + 3 {
+            self.claim_latch = None;
+        }
+
+        Ok(value)
     }
 
     fn store8(&mut self, addr: Address, value: u8) -> Result<(), BusError> {
@@ -84,11 +144,16 @@ impl Addressable for InterruptController {
                 Ok(())
             }
             SET_PENDING_OFFSET..=11 => {
-                self.pending |= mask;
+                self.pending |= mask & !self.claimed;
                 Ok(())
             }
-            CLEAR_PENDING_OFFSET..=15 => {
-                self.pending &= !mask;
+            CLAIM_COMPLETE_OFFSET..=15 => {
+                self.complete_staging[(offset - 12) as usize] = value;
+                if offset == CLAIM_COMPLETE_OFFSET + 3 {
+                    let source_id = u32::from_le_bytes(self.complete_staging);
+                    self.complete_source(source_id);
+                    self.complete_staging = [0; 4];
+                }
                 Ok(())
             }
             _ => Err(BusError::UnmappedAddress { addr }),
@@ -118,22 +183,43 @@ mod tests {
     }
 
     #[test]
-    fn clear_register_acknowledges_pending_sources() {
+    fn claim_register_selects_highest_priority_pending_source() {
         let mut controller = InterruptController::new(CONTROLLER_BASE);
 
         write_u32(&mut controller, CONTROLLER_BASE + 4, 0b0101);
         write_u32(&mut controller, CONTROLLER_BASE + 8, 0b0101);
-        write_u32(&mut controller, CONTROLLER_BASE + 12, 0b0001);
 
+        assert_eq!(read_u32(&mut controller, CONTROLLER_BASE + 12), 1);
         assert_eq!(read_u32(&mut controller, CONTROLLER_BASE), 0b0100);
         assert_eq!(
             controller.pending_interrupt(),
             Some(InterruptLine::MachineExternal)
         );
 
-        write_u32(&mut controller, CONTROLLER_BASE + 12, 0b0100);
+        assert_eq!(read_u32(&mut controller, CONTROLLER_BASE + 12), 3);
         assert_eq!(read_u32(&mut controller, CONTROLLER_BASE), 0);
         assert_eq!(controller.pending_interrupt(), None);
+    }
+
+    #[test]
+    fn completion_allows_source_to_be_raised_again() {
+        let mut controller = InterruptController::new(CONTROLLER_BASE);
+
+        write_u32(&mut controller, CONTROLLER_BASE + 4, 0b0001);
+        write_u32(&mut controller, CONTROLLER_BASE + 8, 0b0001);
+
+        assert_eq!(read_u32(&mut controller, CONTROLLER_BASE + 12), 1);
+        assert_eq!(controller.pending_interrupt(), None);
+
+        write_u32(&mut controller, CONTROLLER_BASE + 8, 0b0001);
+        assert_eq!(controller.pending_interrupt(), None);
+
+        write_u32(&mut controller, CONTROLLER_BASE + 12, 1);
+        write_u32(&mut controller, CONTROLLER_BASE + 8, 0b0001);
+        assert_eq!(
+            controller.pending_interrupt(),
+            Some(InterruptLine::MachineExternal)
+        );
     }
 
     #[test]

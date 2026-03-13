@@ -73,17 +73,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    let claimed_source = machine.bus_mut().load32(INTERRUPT_CONTROLLER_BASE + 12)?;
+    machine
+        .bus_mut()
+        .store32(INTERRUPT_CONTROLLER_BASE + 12, claimed_source)?;
+
     println!(
-        "x3={} x5={} external_interrupt_seen={} mepc=0x{:08x} mcause=0x{:08x}",
+        "x3={} x5={} external_interrupt_seen={} claimed_source={} mepc=0x{:08x} mcause=0x{:08x}",
         machine.cpu().hart_state().registers.read(3),
         machine.cpu().hart_state().registers.read(5),
         machine.cpu().hart_state().registers.read(6),
+        claimed_source,
         machine.cpu().hart_state().csrs.read(CsrAddress::Mepc),
         machine.cpu().hart_state().csrs.read(CsrAddress::Mcause)
     );
 
     println!(
-        "computer ready: ReferenceCore provides the architectural oracle and external devices now include an interrupt controller"
+        "computer ready: ReferenceCore provides the architectural oracle and external devices now include a claim/complete interrupt controller"
     );
 
     Ok(())
