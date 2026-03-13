@@ -1,7 +1,9 @@
 use rvsim_cpu::{CpuModel, ReferenceCore};
 use rvsim_devices::{InterruptController, MachineSoftwareInterrupt, Ram, Rom, SimpleUart};
 use rvsim_isa::CsrAddress;
-use rvsim_system::{AddressRange, Bus, CacheConfig, Machine, MemoryMap, SplitL1Cache};
+use rvsim_system::{
+    AddressRange, Bus, CacheConfig, Machine, MemoryMap, ReplacementPolicy, SplitL1Cache,
+};
 
 const RESET_VECTOR: u32 = 0x0000_0000;
 const RAM_BASE: u64 = 0x1000_0000;
@@ -21,6 +23,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0,
         0x0013_0313, // addi x6, x6, 1
         0x3020_0073, // mret
+        0,
+        0,
     ];
 
     let mut memory = MemoryMap::new();
@@ -32,8 +36,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cache = SplitL1Cache::new(
         memory,
-        CacheConfig::new(64, vec![AddressRange::new(RESET_VECTOR as u64, 0x1000)]),
-        CacheConfig::new(64, vec![AddressRange::new(RAM_BASE, 0x1000)]),
+        CacheConfig::new(64, vec![AddressRange::new(RESET_VECTOR as u64, 0x1000)])
+            .with_line_size(16)
+            .with_associativity(2)
+            .with_replacement_policy(ReplacementPolicy::LeastRecentlyUsed),
+        CacheConfig::new(64, vec![AddressRange::new(RAM_BASE, 0x1000)])
+            .with_line_size(16)
+            .with_associativity(2)
+            .with_replacement_policy(ReplacementPolicy::LeastRecentlyUsed),
     );
 
     let cpu = ReferenceCore::new(RESET_VECTOR);
@@ -112,12 +122,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         software_mcause
     );
     println!(
-        "cache stats: icache(hits={} misses={} invalidations={}) dcache(hits={} misses={} invalidations={})",
+        "cache stats: icache(hits={} misses={} refills={} evictions={} invalidations={}) dcache(hits={} misses={} refills={} evictions={} invalidations={})",
         machine.bus().stats().instruction.read_hits,
         machine.bus().stats().instruction.read_misses,
+        machine.bus().stats().instruction.refills,
+        machine.bus().stats().instruction.evictions,
         machine.bus().stats().instruction.invalidations,
         machine.bus().stats().data.read_hits,
         machine.bus().stats().data.read_misses,
+        machine.bus().stats().data.refills,
+        machine.bus().stats().data.evictions,
         machine.bus().stats().data.invalidations
     );
 

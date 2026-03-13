@@ -10,7 +10,9 @@ pub mod memory_map;
 pub use bus::{
     AccessKind, Address, AddressRange, Addressable, Bus, BusError, InterruptLine, InterruptSet,
 };
-pub use cache::{CacheConfig, CacheStats, DirectMappedCache, SplitCacheStats, SplitL1Cache};
+pub use cache::{
+    CacheConfig, CacheStats, DirectMappedCache, ReplacementPolicy, SplitCacheStats, SplitL1Cache,
+};
 pub use clock::Clock;
 pub use component::{CpuCycle, Processor, SimComponent};
 pub use machine::Machine;
