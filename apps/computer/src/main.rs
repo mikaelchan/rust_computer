@@ -1,7 +1,7 @@
 use rvsim_cpu::{CpuModel, ReferenceCore};
 use rvsim_devices::{InterruptController, MachineSoftwareInterrupt, Ram, Rom, SimpleUart};
 use rvsim_isa::CsrAddress;
-use rvsim_system::{Bus, Machine, MemoryMap};
+use rvsim_system::{AddressRange, Bus, CacheConfig, DirectMappedCache, Machine, MemoryMap};
 
 const RESET_VECTOR: u32 = 0x0000_0000;
 const RAM_BASE: u64 = 0x1000_0000;
@@ -30,8 +30,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     memory.map_device(InterruptController::new(INTERRUPT_CONTROLLER_BASE))?;
     memory.map_device(MachineSoftwareInterrupt::new(MSIP_BASE))?;
 
+    let cache = DirectMappedCache::new(
+        memory,
+        CacheConfig::new(
+            64,
+            vec![
+                AddressRange::new(RESET_VECTOR as u64, 0x1000),
+                AddressRange::new(RAM_BASE, 0x1000),
+            ],
+        ),
+    );
+
     let cpu = ReferenceCore::new(RESET_VECTOR);
-    let mut machine = Machine::new(cpu, memory);
+    let mut machine = Machine::new(cpu, cache);
     machine
         .cpu_mut()
         .hart_state_mut()
@@ -105,9 +116,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         external_mcause,
         software_mcause
     );
+    println!(
+        "cache stats: hits={} misses={} invalidations={}",
+        machine.bus().stats().read_hits,
+        machine.bus().stats().read_misses,
+        machine.bus().stats().invalidations
+    );
 
     println!(
-        "computer ready: ReferenceCore now demonstrates both claim/complete external interrupts and a machine software interrupt source"
+        "computer ready: ReferenceCore now demonstrates a unified L1 cache plus external and software interrupts"
     );
 
     Ok(())

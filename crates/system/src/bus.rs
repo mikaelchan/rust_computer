@@ -169,6 +169,7 @@ pub trait Addressable {
 pub trait Bus {
     fn load8(&mut self, addr: Address) -> Result<u8, BusError>;
     fn store8(&mut self, addr: Address, value: u8) -> Result<(), BusError>;
+    fn reset(&mut self) {}
     fn tick(&mut self) {}
     fn is_busy(&self) -> bool {
         false

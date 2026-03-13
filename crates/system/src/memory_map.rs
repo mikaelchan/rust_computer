@@ -122,6 +122,10 @@ impl MemoryMap {
 }
 
 impl Bus for MemoryMap {
+    fn reset(&mut self) {
+        MemoryMap::reset(self);
+    }
+
     fn load8(&mut self, addr: Address) -> Result<u8, BusError> {
         let index = self.begin_access(addr, AccessKind::Load, 1)?;
         self.devices[index].device.load8(addr)
