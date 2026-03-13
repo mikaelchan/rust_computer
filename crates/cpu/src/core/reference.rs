@@ -93,7 +93,7 @@ impl Processor for ReferenceCore {
             decoded
         } else {
             let pc = self.state.pc;
-            let raw = match bus.load32(u64::from(pc)) {
+            let raw = match bus.fetch32(u64::from(pc)) {
                 Ok(raw) => raw,
                 Err(BusError::Busy { .. }) => {
                     self.last_result = ExecutionResult {
@@ -203,6 +203,26 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct FetchOnlyBus {
+        instruction: u32,
+    }
+
+    impl Bus for FetchOnlyBus {
+        fn load8(&mut self, _addr: u64) -> Result<u8, rvsim_system::BusError> {
+            panic!("instruction fetch should use fetch32, not byte loads")
+        }
+
+        fn store8(&mut self, _addr: u64, _value: u8) -> Result<(), rvsim_system::BusError> {
+            panic!("test program does not perform stores")
+        }
+
+        fn fetch32(&mut self, addr: u64) -> Result<u32, rvsim_system::BusError> {
+            assert_eq!(addr, 0);
+            Ok(self.instruction)
+        }
+    }
+
     #[test]
     fn runs_addi_program() {
         let _ = AddressRange::new(0, 16);
@@ -218,6 +238,20 @@ mod tests {
         assert_eq!(state.registers.read(2), 10);
         assert_eq!(state.pc, 8);
         assert_eq!(RegisterFile::NUM_REGISTERS, 32);
+    }
+
+    #[test]
+    fn fetches_instructions_via_bus_fetch_path() {
+        let mut bus = FetchOnlyBus {
+            instruction: encode_addi(1, 0, 5),
+        };
+        let mut core = ReferenceCore::new(0);
+
+        let cycle = core.step_cycle(&mut bus).expect("cycle should work");
+
+        assert_eq!(cycle.retired_instructions, 1);
+        assert_eq!(core.hart_state().registers.read(1), 5);
+        assert_eq!(core.hart_state().pc, 4);
     }
 
     #[test]

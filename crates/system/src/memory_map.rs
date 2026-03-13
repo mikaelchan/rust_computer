@@ -126,6 +126,15 @@ impl Bus for MemoryMap {
         MemoryMap::reset(self);
     }
 
+    fn fetch32(&mut self, addr: Address) -> Result<u32, BusError> {
+        if addr % 4 != 0 {
+            return Err(BusError::MisalignedAccess { addr, width: 4 });
+        }
+
+        let index = self.begin_access(addr, AccessKind::Fetch, 4)?;
+        Ok(u32::from_le_bytes(self.load_bytes::<4>(index, addr)?))
+    }
+
     fn load8(&mut self, addr: Address) -> Result<u8, BusError> {
         let index = self.begin_access(addr, AccessKind::Load, 1)?;
         self.devices[index].device.load8(addr)

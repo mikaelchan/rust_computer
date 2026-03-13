@@ -5,12 +5,12 @@ use crate::{
     predictor::{BranchPrediction, BranchPredictor},
 };
 
-/// Fetch one instruction from the unified memory bus.
+/// Fetch one instruction from the bus instruction path.
 pub fn fetch<P>(bus: &mut dyn Bus, pc: u32, predictor: &P) -> Result<IfIdPayload, BusError>
 where
     P: BranchPredictor + ?Sized,
 {
-    let raw = bus.load32(u64::from(pc))?;
+    let raw = bus.fetch32(u64::from(pc))?;
     let prediction = predict_from_raw(pc, raw, predictor);
     Ok(IfIdPayload {
         pc,

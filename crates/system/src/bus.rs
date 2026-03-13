@@ -8,6 +8,7 @@ pub type Address = u64;
 /// Direction of a bus access used by timing models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessKind {
+    Fetch,
     Load,
     Store,
 }
@@ -179,6 +180,10 @@ pub trait Bus {
     }
     fn pending_interrupt(&self) -> Option<InterruptLine> {
         self.pending_interrupts().highest_priority()
+    }
+
+    fn fetch32(&mut self, addr: Address) -> Result<u32, BusError> {
+        self.load32(addr)
     }
 
     fn load16(&mut self, addr: Address) -> Result<u16, BusError> {
