@@ -188,13 +188,16 @@ impl Processor for PipelineCore {
         let mut trap_result = None;
         let mut commit = None;
         let mut flush_reason = None;
+        let mut memory_wait = false;
 
         if let Some(payload) = current.mem_wb.payload {
             commit = Some(wb_stage::write_back(&mut self.state, payload));
             retired_instructions += 1;
         }
 
-        if let Some(interrupt) = self.state.csrs.pending_machine_interrupt() {
+        if !bus.is_busy()
+            && let Some(interrupt) = self.state.csrs.pending_machine_interrupt()
+        {
             let current_pc = self.state.pc;
             trap_result = Some(apply_trap(
                 &mut self.state,
@@ -218,6 +221,15 @@ impl Processor for PipelineCore {
                     MemoryEvent::Advance(payload) => {
                         next.mem_wb.payload = Some(payload);
                     }
+                    MemoryEvent::Stall(payload) => {
+                        memory_wait = true;
+                        fetch_stalled = true;
+                        decode_stalled = current.if_id.payload.is_some();
+                        next.ex_mem.payload = Some(payload);
+                        next.id_ex.payload = current.id_ex.payload;
+                        next.if_id.payload = current.if_id.payload;
+                        note = "memory wait";
+                    }
                     MemoryEvent::Trap(trap) => {
                         trap_result = Some(apply_trap(&mut self.state, trap, payload.decoded.pc));
                         next_front_end_pc = self.state.pc;
@@ -229,7 +241,7 @@ impl Processor for PipelineCore {
             }
         }
 
-        if !flushed {
+        if !flushed && !memory_wait {
             if let Some(payload) = current.id_ex.payload {
                 let rs1_value = self.forwarded_operand(
                     payload.decoded.rs1,
@@ -304,7 +316,7 @@ impl Processor for PipelineCore {
             }
         }
 
-        if !flushed {
+        if !flushed && !memory_wait {
             if let Some(payload) = current.if_id.payload {
                 match decode_stage(payload.raw, payload.pc) {
                     Ok(decoded) => {
@@ -383,7 +395,7 @@ impl Processor for PipelineCore {
         if flushed {
             next.if_id.payload = None;
             next.id_ex.payload = None;
-        } else if !decode_stalled && !fetch_stalled {
+        } else if !memory_wait && !decode_stalled && !fetch_stalled {
             let fetch_pc = next_front_end_pc;
             match fetch(bus, fetch_pc, &self.predictor) {
                 Ok(payload) => {
@@ -393,6 +405,12 @@ impl Processor for PipelineCore {
                     next_front_end_pc = payload.predicted_pc;
                     if payload.predicted_taken && note == "progress" {
                         note = "predicted taken";
+                    }
+                }
+                Err(BusError::Busy { .. }) => {
+                    fetch_stalled = true;
+                    if note == "progress" {
+                        note = "fetch wait";
                     }
                 }
                 Err(BusError::MisalignedAccess { .. }) => {
@@ -474,7 +492,9 @@ impl Processor for PipelineCore {
 
 #[cfg(test)]
 mod tests {
-    use rvsim_devices::{InterruptController, MachineSoftwareInterrupt, MachineTimer, Rom};
+    use rvsim_devices::{
+        InterruptController, LatencyAdapter, MachineSoftwareInterrupt, MachineTimer, Ram, Rom,
+    };
     use rvsim_system::{Bus, BusError, Machine, MemoryMap, Processor};
 
     use super::PipelineCore;
@@ -979,6 +999,40 @@ mod tests {
         );
         assert_eq!(machine.cpu().stats().trap_count, 1);
         assert_eq!(machine.cpu().stats().trap_flushes, 1);
+    }
+
+    #[test]
+    fn stalls_memory_stage_until_ram_latency_completes() {
+        const RAM_BASE: u64 = 0x1000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Rom::from_words(
+                0,
+                &[
+                    encode_lui(1, 0x10000),
+                    encode_addi(2, 0, 9),
+                    encode_sw(2, 1, 0),
+                    encode_lw(3, 1, 0),
+                    encode_jal(0, 0),
+                ],
+            ))
+            .expect("rom should map");
+        memory
+            .map_device(LatencyAdapter::new(Ram::new(RAM_BASE, 0x1000), 2))
+            .expect("ram should map");
+
+        let mut machine = Machine::new(PipelineCore::new(0), memory);
+        let mut observed_memory_wait = false;
+        for _ in 0..18 {
+            machine
+                .step_cycle()
+                .expect("pipeline cycle should work through ram latency");
+            observed_memory_wait |= machine.cpu().last_trace().note == "memory wait";
+        }
+
+        assert!(observed_memory_wait);
+        assert_eq!(machine.cpu().hart_state().registers.read(3), 9);
     }
 
     fn encode_add(rd: u8, rs1: u8, rs2: u8) -> u32 {

@@ -13,6 +13,7 @@ pub struct ReferenceCore {
     reset_vector: u32,
     cycle: u64,
     state: HartState,
+    pending_decoded: Option<rvsim_isa::DecodedInstruction>,
     last_result: ExecutionResult,
 }
 
@@ -23,6 +24,7 @@ impl ReferenceCore {
             reset_vector,
             cycle: 0,
             state: HartState::new(reset_vector),
+            pending_decoded: None,
             last_result: ExecutionResult::default(),
         }
     }
@@ -51,6 +53,7 @@ impl SimComponent for ReferenceCore {
     fn reset(&mut self) {
         self.cycle = 0;
         self.state.reset(self.reset_vector);
+        self.pending_decoded = None;
         self.last_result = ExecutionResult::default();
     }
 }
@@ -74,7 +77,10 @@ impl Processor for ReferenceCore {
             });
         }
 
-        if let Some(interrupt) = self.state.csrs.pending_machine_interrupt() {
+        if self.pending_decoded.is_none()
+            && !bus.is_busy()
+            && let Some(interrupt) = self.state.csrs.pending_machine_interrupt()
+        {
             let current_pc = self.state.pc;
             self.last_result = apply_trap(&mut self.state, Trap::Interrupt(interrupt), current_pc);
             return Ok(CpuCycle {
@@ -83,39 +89,56 @@ impl Processor for ReferenceCore {
             });
         }
 
-        let pc = self.state.pc;
-        let raw = match bus.load32(u64::from(pc)) {
-            Ok(raw) => raw,
-            Err(BusError::MisalignedAccess { .. }) => {
-                self.last_result = apply_trap(
-                    &mut self.state,
-                    Trap::Exception(Exception::InstructionAddressMisaligned { addr: pc }),
-                    pc,
-                );
-                return Ok(CpuCycle {
-                    retired_instructions: 0,
-                    stalled: true,
-                });
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let decoded = if let Some(decoded) = self.pending_decoded {
+            decoded
+        } else {
+            let pc = self.state.pc;
+            let raw = match bus.load32(u64::from(pc)) {
+                Ok(raw) => raw,
+                Err(BusError::Busy { .. }) => {
+                    self.last_result = ExecutionResult {
+                        retired: 0,
+                        trap: None,
+                        memory_access: true,
+                    };
+                    return Ok(CpuCycle {
+                        retired_instructions: 0,
+                        stalled: true,
+                    });
+                }
+                Err(BusError::MisalignedAccess { .. }) => {
+                    self.last_result = apply_trap(
+                        &mut self.state,
+                        Trap::Exception(Exception::InstructionAddressMisaligned { addr: pc }),
+                        pc,
+                    );
+                    return Ok(CpuCycle {
+                        retired_instructions: 0,
+                        stalled: true,
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
 
-        let decoded = match decode(raw, pc) {
-            Ok(decoded) => decoded,
-            Err(_error) => {
-                self.last_result = apply_trap(
-                    &mut self.state,
-                    Trap::Exception(Exception::IllegalInstruction { instruction: raw }),
-                    pc,
-                );
-                return Ok(CpuCycle {
-                    retired_instructions: 0,
-                    stalled: true,
-                });
+            match decode(raw, pc) {
+                Ok(decoded) => decoded,
+                Err(_error) => {
+                    self.last_result = apply_trap(
+                        &mut self.state,
+                        Trap::Exception(Exception::IllegalInstruction { instruction: raw }),
+                        pc,
+                    );
+                    return Ok(CpuCycle {
+                        retired_instructions: 0,
+                        stalled: true,
+                    });
+                }
             }
         };
 
         self.last_result = execute_decoded(&mut self.state, bus, decoded)?;
+        self.pending_decoded =
+            (self.last_result.retired == 0 && self.last_result.trap.is_none()).then_some(decoded);
 
         Ok(CpuCycle {
             retired_instructions: self.last_result.retired,
@@ -126,7 +149,9 @@ impl Processor for ReferenceCore {
 
 #[cfg(test)]
 mod tests {
-    use rvsim_devices::{InterruptController, MachineSoftwareInterrupt, MachineTimer, Rom};
+    use rvsim_devices::{
+        InterruptController, LatencyAdapter, MachineSoftwareInterrupt, MachineTimer, Ram, Rom,
+    };
     use rvsim_system::{AddressRange, Bus, InterruptLine, InterruptSet, Processor};
     use rvsim_system::{Machine, MemoryMap};
 
@@ -495,6 +520,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stalls_on_instruction_fetch_latency_and_retries_same_pc() {
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(LatencyAdapter::new(
+                Rom::from_words(0, &[encode_addi(1, 0, 5), encode_jal(0, 0)]),
+                1,
+            ))
+            .expect("rom should map");
+
+        let mut machine = Machine::new(ReferenceCore::new(0), memory);
+
+        let first = machine.step_cycle().expect("first cycle should stall");
+        assert_eq!(first.retired_instructions, 0);
+        assert!(first.stalled);
+        assert_eq!(machine.cpu().hart_state().pc, 0);
+
+        let second = machine.step_cycle().expect("second cycle should retire");
+        assert_eq!(second.retired_instructions, 1);
+        assert_eq!(machine.cpu().hart_state().pc, 4);
+        assert_eq!(machine.cpu().hart_state().registers.read(1), 5);
+    }
+
+    #[test]
+    fn stalls_on_data_access_latency_and_retries_load_store() {
+        const RAM_BASE: u64 = 0x1000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Rom::from_words(
+                0,
+                &[
+                    encode_lui(1, 0x10000),
+                    encode_addi(2, 0, 9),
+                    encode_sw(2, 1, 0),
+                    encode_lw(3, 1, 0),
+                    encode_jal(0, 0),
+                ],
+            ))
+            .expect("rom should map");
+        memory
+            .map_device(LatencyAdapter::new(Ram::new(RAM_BASE, 0x1000), 2))
+            .expect("ram should map");
+
+        let mut machine = Machine::new(ReferenceCore::new(0), memory);
+        let mut stalled_cycles = 0;
+        for _ in 0..10 {
+            let cycle = machine
+                .step_cycle()
+                .expect("reference cycle should work through ram latency");
+            stalled_cycles += u64::from(cycle.stalled);
+        }
+
+        assert!(stalled_cycles >= 4);
+        assert_eq!(machine.cpu().hart_state().registers.read(3), 9);
+    }
+
     fn encode_csrrwi(rd: u8, csr: u16, zimm: u8) -> u32 {
         ((csr as u32) << 20)
             | ((zimm as u32) << 15)
@@ -508,6 +590,25 @@ mod tests {
             | ((rs1 as u32) << 15)
             | ((rd as u32) << 7)
             | 0b0010011
+    }
+
+    fn encode_lui(rd: u8, upper_20: u32) -> u32 {
+        (upper_20 << 12) | ((rd as u32) << 7) | 0b0110111
+    }
+
+    fn encode_lw(rd: u8, rs1: u8, imm: i16) -> u32 {
+        (((imm as u16 as u32) & 0x0fff) << 20)
+            | ((rs1 as u32) << 15)
+            | (0b010 << 12)
+            | ((rd as u32) << 7)
+            | 0b0000011
+    }
+
+    fn encode_sw(rs2: u8, rs1: u8, imm: i16) -> u32 {
+        let imm = imm as u16 as u32;
+        let imm_low = (imm & 0x1f) << 7;
+        let imm_high = ((imm >> 5) & 0x7f) << 25;
+        imm_high | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | (0b010 << 12) | imm_low | 0b0100011
     }
 
     fn encode_jal(rd: u8, imm: i32) -> u32 {

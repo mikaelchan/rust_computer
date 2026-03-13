@@ -20,6 +20,6 @@
 
 ## Phase 4
 
-- Add cache and bus timing.
+- Add cache hierarchy and richer bus timing on top of the current fixed-latency wait-state model.
 - Prepare interfaces for LSQ, ROB, RAT, and reservation stations.
 - Introduce a separate out-of-order core instead of overloading the in-order design.

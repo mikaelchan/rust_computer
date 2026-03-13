@@ -82,6 +82,13 @@ pub fn execute_decoded(
                     });
                 }
                 Err(error) => {
+                    if matches!(error, BusError::Busy { .. }) {
+                        return Ok(ExecutionResult {
+                            retired: 0,
+                            trap: None,
+                            memory_access: true,
+                        });
+                    }
                     if let Some(trap) = map_memory_error(error.clone(), address as u32, true) {
                         let mut result = apply_trap(state, trap, current_pc);
                         result.memory_access = true;
@@ -103,6 +110,13 @@ pub fn execute_decoded(
                     });
                 }
                 Err(error) => {
+                    if matches!(error, BusError::Busy { .. }) {
+                        return Ok(ExecutionResult {
+                            retired: 0,
+                            trap: None,
+                            memory_access: true,
+                        });
+                    }
                     if let Some(trap) = map_memory_error(error.clone(), address as u32, false) {
                         let mut result = apply_trap(state, trap, current_pc);
                         result.memory_access = true;
@@ -227,6 +241,7 @@ fn map_memory_error(error: BusError, address: u32, is_load: bool) -> Option<Trap
         } else {
             Exception::StoreAddressMisaligned { addr: address }
         })),
+        BusError::Busy { .. } => None,
         BusError::UnmappedAddress { .. }
         | BusError::ReadOnlyAddress { .. }
         | BusError::DeviceFault { .. } => None,

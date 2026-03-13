@@ -5,6 +5,13 @@ use core::fmt;
 /// Physical address used across the computer model.
 pub type Address = u64;
 
+/// Direction of a bus access used by timing models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessKind {
+    Load,
+    Store,
+}
+
 /// Interrupt lines exposed by memory-mapped devices to the CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptLine {
@@ -110,6 +117,7 @@ impl AddressRange {
 /// Bus-level failures exposed by devices and memory maps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BusError {
+    Busy { remaining_cycles: u32 },
     UnmappedAddress { addr: Address },
     MisalignedAccess { addr: Address, width: usize },
     ReadOnlyAddress { addr: Address },
@@ -119,6 +127,9 @@ pub enum BusError {
 impl fmt::Display for BusError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Busy { remaining_cycles } => {
+                write!(f, "bus busy for {remaining_cycles} more cycles")
+            }
             Self::UnmappedAddress { addr } => write!(f, "unmapped address 0x{addr:08x}"),
             Self::MisalignedAccess { addr, width } => {
                 write!(f, "misaligned access at 0x{addr:08x} for width {width}")
@@ -140,6 +151,9 @@ pub trait Addressable {
 
     fn reset(&mut self) {}
     fn tick(&mut self) {}
+    fn access_latency(&self, _addr: Address, _kind: AccessKind, _width: usize) -> u32 {
+        0
+    }
     fn pending_interrupts(&self) -> InterruptSet {
         InterruptSet::empty()
     }
@@ -156,6 +170,9 @@ pub trait Bus {
     fn load8(&mut self, addr: Address) -> Result<u8, BusError>;
     fn store8(&mut self, addr: Address, value: u8) -> Result<(), BusError>;
     fn tick(&mut self) {}
+    fn is_busy(&self) -> bool {
+        false
+    }
     fn pending_interrupts(&self) -> InterruptSet {
         InterruptSet::empty()
     }

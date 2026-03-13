@@ -10,6 +10,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryEvent {
     Advance(MemWbPayload),
+    Stall(ExMemPayload),
     Trap(Trap),
 }
 
@@ -25,6 +26,7 @@ pub fn access(bus: &mut dyn Bus, payload: ExMemPayload) -> Result<MemoryEvent, B
                     csr_write: payload.csr_write,
                     next_pc: payload.next_pc,
                 })),
+                Err(BusError::Busy { .. }) => Ok(MemoryEvent::Stall(payload)),
                 Err(BusError::MisalignedAccess { .. }) => Ok(MemoryEvent::Trap(Trap::Exception(
                     Exception::LoadAddressMisaligned {
                         addr: address as u32,
@@ -42,6 +44,7 @@ pub fn access(bus: &mut dyn Bus, payload: ExMemPayload) -> Result<MemoryEvent, B
                     csr_write: payload.csr_write,
                     next_pc: payload.next_pc,
                 })),
+                Err(BusError::Busy { .. }) => Ok(MemoryEvent::Stall(payload)),
                 Err(BusError::MisalignedAccess { .. }) => Ok(MemoryEvent::Trap(Trap::Exception(
                     Exception::StoreAddressMisaligned {
                         addr: address as u32,
