@@ -52,6 +52,7 @@ pub struct ExMemLatch {
 pub struct MemWbPayload {
     pub decoded: DecodedInstruction,
     pub writeback_value: Option<u32>,
+    pub next_pc: u32,
 }
 
 /// MEM/WB latch state.

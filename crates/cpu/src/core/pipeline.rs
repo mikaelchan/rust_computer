@@ -27,6 +27,7 @@ use crate::{
 pub struct PipelineCore {
     reset_vector: u32,
     cycle: u64,
+    front_end_pc: u32,
     state: HartState,
     predictor: BimodalPredictor,
     latches: PipelineLatches,
@@ -41,6 +42,7 @@ impl PipelineCore {
         Self {
             reset_vector,
             cycle: 0,
+            front_end_pc: reset_vector,
             state: HartState::new(reset_vector),
             predictor: BimodalPredictor::default(),
             latches: PipelineLatches::default(),
@@ -58,6 +60,11 @@ impl PipelineCore {
     #[must_use]
     pub fn last_trace(&self) -> &PipelineTrace {
         &self.last_trace
+    }
+
+    #[must_use]
+    pub const fn front_end_pc(&self) -> u32 {
+        self.front_end_pc
     }
 
     fn forwarded_operand(
@@ -110,6 +117,7 @@ impl CpuModel for PipelineCore {
 impl SimComponent for PipelineCore {
     fn reset(&mut self) {
         self.cycle = 0;
+        self.front_end_pc = self.reset_vector;
         self.state.reset(self.reset_vector);
         self.latches = PipelineLatches::default();
         self.last_trace = PipelineTrace::default();
@@ -148,7 +156,7 @@ impl Processor for PipelineCore {
         let decode_pc = current.if_id.payload.map(|payload| payload.pc);
 
         let mut next = PipelineLatches::default();
-        let mut next_fetch_pc = self.state.pc;
+        let mut next_front_end_pc = self.front_end_pc;
         let mut retired_instructions = 0;
         let mut fetch_stalled = false;
         let mut decode_stalled = false;
@@ -174,7 +182,7 @@ impl Processor for PipelineCore {
                 }
                 MemoryEvent::Trap(trap) => {
                     trap_result = Some(apply_trap(&mut self.state, trap, payload.decoded.pc));
-                    next_fetch_pc = self.state.pc;
+                    next_front_end_pc = self.state.pc;
                     flushed = true;
                     note = "memory trap";
                 }
@@ -209,7 +217,7 @@ impl Processor for PipelineCore {
                             detect_branch_flush(payload.predicted_pc, outcome.next_pc);
                         if flush_status.flush_required {
                             flushed = true;
-                            next_fetch_pc = outcome.next_pc;
+                            next_front_end_pc = outcome.next_pc;
                             note = "branch flush";
                         }
 
@@ -223,13 +231,13 @@ impl Processor for PipelineCore {
                     }
                     ExecuteEvent::Trap(trap) => {
                         trap_result = Some(apply_trap(&mut self.state, trap, payload.decoded.pc));
-                        next_fetch_pc = self.state.pc;
+                        next_front_end_pc = self.state.pc;
                         flushed = true;
                         note = "execute trap";
                     }
                     ExecuteEvent::ReturnFromTrap => {
                         trap_result = Some(return_from_trap(&mut self.state));
-                        next_fetch_pc = self.state.pc;
+                        next_front_end_pc = self.state.pc;
                         flushed = true;
                         note = "mret";
                     }
@@ -278,7 +286,7 @@ impl Processor for PipelineCore {
                             }),
                             payload.pc,
                         ));
-                        next_fetch_pc = self.state.pc;
+                        next_front_end_pc = self.state.pc;
                         flushed = true;
                         note = "illegal instruction";
                     }
@@ -290,13 +298,13 @@ impl Processor for PipelineCore {
             next.if_id.payload = None;
             next.id_ex.payload = None;
         } else if !decode_stalled && !fetch_stalled {
-            let fetch_pc = next_fetch_pc;
+            let fetch_pc = next_front_end_pc;
             match fetch(bus, fetch_pc, &self.predictor) {
                 Ok(payload) => {
                     fetched_pc = Some(payload.pc);
                     predicted_taken = payload.predicted_taken;
                     next.if_id.payload = Some(payload);
-                    next_fetch_pc = payload.predicted_pc;
+                    next_front_end_pc = payload.predicted_pc;
                     if payload.predicted_taken && note == "progress" {
                         note = "predicted taken";
                     }
@@ -307,7 +315,7 @@ impl Processor for PipelineCore {
                         Trap::Exception(Exception::InstructionAddressMisaligned { addr: fetch_pc }),
                         fetch_pc,
                     ));
-                    next_fetch_pc = self.state.pc;
+                    next_front_end_pc = self.state.pc;
                     note = "instruction address misaligned";
                 }
                 Err(error) => return Err(error.into()),
@@ -316,18 +324,21 @@ impl Processor for PipelineCore {
             note = "structural hazard";
         }
 
-        self.state.pc = next_fetch_pc;
-        self.latches = next;
-        let mut result = trap_result.unwrap_or(ExecutionResult {
-            retired: retired_instructions,
-            trap: None,
+        let result = ExecutionResult {
+            retired: retired_instructions + trap_result.map(|value| value.retired).unwrap_or(0),
+            trap: trap_result.and_then(|value| value.trap),
             memory_access: current
                 .ex_mem
                 .payload
                 .map(|payload| ex_stage::uses_memory(payload.decoded))
-                .unwrap_or(false),
-        });
-        result.retired = retired_instructions;
+                .unwrap_or(false)
+                || trap_result
+                    .map(|value| value.memory_access)
+                    .unwrap_or(false),
+        };
+
+        self.front_end_pc = next_front_end_pc;
+        self.latches = next;
         self.last_result = result;
         self.last_trace = PipelineTrace {
             cycle: self.cycle,
@@ -345,7 +356,7 @@ impl Processor for PipelineCore {
         };
 
         Ok(CpuCycle {
-            retired_instructions,
+            retired_instructions: self.last_result.retired,
             stalled: fetch_stalled || decode_stalled,
         })
     }
@@ -464,6 +475,26 @@ mod tests {
         assert!(observed_flush);
         assert_eq!(core.hart_state().registers.read(2), 0);
         assert_eq!(core.hart_state().registers.read(3), 7);
+    }
+
+    #[test]
+    fn keeps_front_end_pc_ahead_of_architectural_pc_until_writeback() {
+        let mut bus = TestBus::new(64);
+        bus.load_program(&[encode_addi(1, 0, 5), encode_addi(2, 0, 6), encode_jal(0, 0)]);
+
+        let mut core = PipelineCore::new(0);
+
+        core.step_cycle(&mut bus)
+            .expect("first pipeline cycle should work");
+        assert_eq!(core.hart_state().pc, 0);
+        assert_eq!(core.front_end_pc(), 4);
+
+        for _ in 0..4 {
+            core.step_cycle(&mut bus)
+                .expect("pipeline cycle should work");
+        }
+
+        assert_eq!(core.hart_state().pc, 4);
     }
 
     #[test]

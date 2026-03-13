@@ -22,6 +22,7 @@ pub fn access(bus: &mut dyn Bus, payload: ExMemPayload) -> Result<MemoryEvent, B
                 Ok(value) => Ok(MemoryEvent::Advance(MemWbPayload {
                     decoded: payload.decoded,
                     writeback_value: Some(value),
+                    next_pc: payload.next_pc,
                 })),
                 Err(BusError::MisalignedAccess { .. }) => Ok(MemoryEvent::Trap(Trap::Exception(
                     Exception::LoadAddressMisaligned {
@@ -37,6 +38,7 @@ pub fn access(bus: &mut dyn Bus, payload: ExMemPayload) -> Result<MemoryEvent, B
                 Ok(()) => Ok(MemoryEvent::Advance(MemWbPayload {
                     decoded: payload.decoded,
                     writeback_value: None,
+                    next_pc: payload.next_pc,
                 })),
                 Err(BusError::MisalignedAccess { .. }) => Ok(MemoryEvent::Trap(Trap::Exception(
                     Exception::StoreAddressMisaligned {
@@ -49,6 +51,7 @@ pub fn access(bus: &mut dyn Bus, payload: ExMemPayload) -> Result<MemoryEvent, B
         _ => Ok(MemoryEvent::Advance(MemWbPayload {
             decoded: payload.decoded,
             writeback_value: payload.writeback_value,
+            next_pc: payload.next_pc,
         })),
     }
 }

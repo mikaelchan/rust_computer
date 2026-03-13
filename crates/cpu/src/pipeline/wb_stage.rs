@@ -7,5 +7,7 @@ pub fn write_back(state: &mut HartState, payload: MemWbPayload) -> u64 {
         state.registers.write(rd, value);
     }
 
+    state.pc = payload.next_pc;
+
     1
 }
