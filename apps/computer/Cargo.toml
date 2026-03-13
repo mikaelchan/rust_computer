@@ -1,5 +1,5 @@
 [package]
-name = "rvsim-simulator"
+name = "rvsim-computer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,5 +11,5 @@ rvsim-devices = { path = "../../crates/devices" }
 rvsim-system = { path = "../../crates/system" }
 
 [[bin]]
-name = "simulator"
+name = "computer"
 path = "src/main.rs"

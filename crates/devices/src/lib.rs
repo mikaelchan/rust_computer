@@ -1,4 +1,4 @@
-//! Memory-mapped device implementations used by the simulator.
+//! Memory-mapped device implementations used by the computer model.
 
 pub mod ram;
 pub mod rom;

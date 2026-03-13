@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-/// Physical address used across the simulator.
+/// Physical address used across the computer model.
 pub type Address = u64;
 
 /// A half-open physical address range.

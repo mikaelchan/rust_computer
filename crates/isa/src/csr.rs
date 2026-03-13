@@ -1,4 +1,4 @@
-//! Control and status register definitions used by the simulator.
+//! Control and status register definitions used by the computer model.
 
 use core::fmt;
 
