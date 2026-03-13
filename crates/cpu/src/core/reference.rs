@@ -162,4 +162,25 @@ mod tests {
         assert_eq!(state.pc, 8);
         assert_eq!(RegisterFile::NUM_REGISTERS, 32);
     }
+
+    #[test]
+    fn executes_csr_read_write_sequence() {
+        let mut bus = TinyBus::default();
+        bus.load_program(&[encode_csrrwi(1, rvsim_isa::CsrAddress::Mtvec as u16, 7)]);
+
+        let mut core = ReferenceCore::new(0);
+        core.step_cycle(&mut bus).expect("csr cycle should work");
+
+        let state = core.hart_state();
+        assert_eq!(state.registers.read(1), 0);
+        assert_eq!(state.csrs.read(rvsim_isa::CsrAddress::Mtvec), 7);
+    }
+
+    fn encode_csrrwi(rd: u8, csr: u16, zimm: u8) -> u32 {
+        ((csr as u32) << 20)
+            | ((zimm as u32) << 15)
+            | (0b101 << 12)
+            | ((rd as u32) << 7)
+            | 0b1110011
+    }
 }

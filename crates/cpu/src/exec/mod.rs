@@ -2,6 +2,7 @@
 
 pub mod alu;
 pub mod branch;
+pub mod csr;
 pub mod load_store;
 
 use rvsim_isa::{
@@ -127,6 +128,15 @@ pub fn execute_decoded(
         InstructionKind::Op(op) => {
             let result = alu::execute_alu(op, rs1_value, rs2_value);
             write_rd(state, decoded.rd, result);
+            state.pc = next_pc;
+        }
+        InstructionKind::Csr(_op) => {
+            let outcome = csr::execute(decoded, &state.csrs, rs1_value)
+                .expect("csr instruction should provide an address");
+            write_rd(state, decoded.rd, outcome.read_value);
+            if let Some(write) = outcome.write {
+                state.csrs.write(write.address, write.value);
+            }
             state.pc = next_pc;
         }
         InstructionKind::System(SystemKind::Ecall) => {

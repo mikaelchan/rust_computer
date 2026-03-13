@@ -1,5 +1,7 @@
 use rvsim_isa::{InstructionKind, Trap};
 
+use crate::exec::csr::CsrWrite;
+
 /// A committed architectural update observed at the end of a cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommitEvent {
@@ -8,6 +10,7 @@ pub struct CommitEvent {
     pub kind: InstructionKind,
     pub destination: Option<u8>,
     pub value: Option<u32>,
+    pub csr_write: Option<CsrWrite>,
 }
 
 /// Why the front end was flushed this cycle.

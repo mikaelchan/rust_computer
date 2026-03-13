@@ -44,6 +44,17 @@ pub enum StoreKind {
     Word,
 }
 
+/// CSR read/modify/write operations supported by the base privileged ISA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CsrOp {
+    ReadWrite,
+    ReadSet,
+    ReadClear,
+    ReadWriteImmediate,
+    ReadSetImmediate,
+    ReadClearImmediate,
+}
+
 /// System instructions used in the initial CPU model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemKind {
@@ -64,5 +75,6 @@ pub enum InstructionKind {
     Store(StoreKind),
     OpImm(AluOp),
     Op(AluOp),
+    Csr(CsrOp),
     System(SystemKind),
 }

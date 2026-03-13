@@ -232,6 +232,7 @@ impl Processor for PipelineCore {
                     rs1_value,
                     rs2_value,
                     self.state.csrs.read(CsrAddress::Mepc),
+                    &self.state.csrs,
                 ) {
                     ExecuteEvent::Advance(outcome) => {
                         if matches!(payload.decoded.kind, InstructionKind::Branch(_)) {
@@ -269,6 +270,7 @@ impl Processor for PipelineCore {
                         next.ex_mem.payload = Some(ExMemPayload {
                             decoded: payload.decoded,
                             writeback_value: outcome.writeback_value,
+                            csr_write: outcome.csr_write,
                             memory_address: outcome.memory_address,
                             store_value: outcome.store_value,
                             next_pc: outcome.next_pc,
@@ -297,11 +299,37 @@ impl Processor for PipelineCore {
                                 detect_raw_hazard(producer.decoded.rd, decoded.rs1, decoded.rs2)
                             })
                             .unwrap_or_default();
+                        let csr_hazard = matches!(decoded.kind, InstructionKind::Csr(_))
+                            && (current
+                                .id_ex
+                                .payload
+                                .map(|payload| {
+                                    matches!(payload.decoded.kind, InstructionKind::Csr(_))
+                                })
+                                .unwrap_or(false)
+                                || current
+                                    .ex_mem
+                                    .payload
+                                    .map(|payload| {
+                                        matches!(payload.decoded.kind, InstructionKind::Csr(_))
+                                    })
+                                    .unwrap_or(false)
+                                || current
+                                    .mem_wb
+                                    .payload
+                                    .map(|payload| {
+                                        matches!(payload.decoded.kind, InstructionKind::Csr(_))
+                                    })
+                                    .unwrap_or(false));
 
-                        if load_use_hazard.stall {
+                        if load_use_hazard.stall || csr_hazard {
                             decode_stalled = true;
                             next.if_id.payload = Some(payload);
-                            note = "load-use stall";
+                            note = if csr_hazard {
+                                "csr stall"
+                            } else {
+                                "load-use stall"
+                            };
                         } else {
                             next.id_ex.payload = Some(IdExPayload {
                                 decoded,
@@ -609,6 +637,57 @@ mod tests {
     }
 
     #[test]
+    fn serializes_back_to_back_csr_instructions() {
+        let mut bus = TestBus::new(128);
+        bus.load_program(&[
+            encode_csrrwi(0, rvsim_isa::CsrAddress::Mtvec as u16, 4),
+            encode_csrrs(1, rvsim_isa::CsrAddress::Mtvec as u16, 0),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        let mut observed_csr_stall = false;
+        for _ in 0..10 {
+            core.step_cycle(&mut bus)
+                .expect("pipeline cycle should work");
+            observed_csr_stall |= core.last_trace().note == "csr stall";
+        }
+
+        assert!(observed_csr_stall);
+        assert_eq!(core.hart_state().registers.read(1), 4);
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtvec), 4);
+    }
+
+    #[test]
+    fn commit_view_reports_csr_writeback() {
+        let mut bus = TestBus::new(128);
+        bus.load_program(&[
+            encode_csrrwi(1, rvsim_isa::CsrAddress::Mstatus as u16, 3),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        let mut csr_commit = None;
+        for _ in 0..6 {
+            core.step_cycle(&mut bus)
+                .expect("pipeline cycle should work");
+            if let Some(commit) = core
+                .last_commit()
+                .filter(|commit| commit.csr_write.is_some())
+            {
+                csr_commit = Some(commit);
+            }
+        }
+
+        let commit = csr_commit.expect("csr instruction should commit");
+        assert_eq!(commit.destination, Some(1));
+        assert_eq!(commit.value, Some(0));
+        let csr_write = commit.csr_write.expect("csr write should be reported");
+        assert_eq!(csr_write.address, rvsim_isa::CsrAddress::Mstatus);
+        assert_eq!(csr_write.value, 3);
+    }
+
+    #[test]
     fn exposes_last_commit_and_cumulative_stats() {
         let mut bus = TestBus::new(64);
         bus.load_program(&[encode_addi(1, 0, 5), encode_jal(0, 0)]);
@@ -723,5 +802,17 @@ mod tests {
             | (funct3 << 12)
             | ((rd as u32) << 7)
             | opcode
+    }
+
+    fn encode_csrrs(rd: u8, csr: u16, rs1: u8) -> u32 {
+        ((csr as u32) << 20) | ((rs1 as u32) << 15) | (0b010 << 12) | ((rd as u32) << 7) | 0b1110011
+    }
+
+    fn encode_csrrwi(rd: u8, csr: u16, zimm: u8) -> u32 {
+        ((csr as u32) << 20)
+            | ((zimm as u32) << 15)
+            | (0b101 << 12)
+            | ((rd as u32) << 7)
+            | 0b1110011
     }
 }

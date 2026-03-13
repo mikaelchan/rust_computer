@@ -3,8 +3,9 @@
 use core::fmt;
 
 use crate::{
+    csr::CsrAddress,
     instruction::DecodedInstruction,
-    opcode::{AluOp, BranchKind, InstructionKind, LoadKind, StoreKind, SystemKind},
+    opcode::{AluOp, BranchKind, CsrOp, InstructionKind, LoadKind, StoreKind, SystemKind},
 };
 
 /// Returned when the decoder encounters an instruction outside the current model.
@@ -133,7 +134,7 @@ pub fn decode(raw: u32, pc: u32) -> Result<DecodedInstruction, DecodeError> {
             0,
             None,
         )),
-        0x73 => Ok(DecodedInstruction::new(
+        0x73 if funct3 == 0 => Ok(DecodedInstruction::new(
             raw,
             pc,
             InstructionKind::System(decode_system(raw)?),
@@ -142,6 +143,16 @@ pub fn decode(raw: u32, pc: u32) -> Result<DecodedInstruction, DecodeError> {
             None,
             0,
             None,
+        )),
+        0x73 => Ok(DecodedInstruction::new(
+            raw,
+            pc,
+            InstructionKind::Csr(decode_csr_op(funct3, raw)?),
+            Some(rd),
+            Some(rs1),
+            None,
+            0,
+            Some(decode_csr_address(raw)?),
         )),
         _ => Err(DecodeError::new(raw)),
     }
@@ -219,6 +230,23 @@ fn decode_system(raw: u32) -> Result<SystemKind, DecodeError> {
     }
 }
 
+fn decode_csr_op(funct3: u8, raw: u32) -> Result<CsrOp, DecodeError> {
+    match funct3 {
+        0b001 => Ok(CsrOp::ReadWrite),
+        0b010 => Ok(CsrOp::ReadSet),
+        0b011 => Ok(CsrOp::ReadClear),
+        0b101 => Ok(CsrOp::ReadWriteImmediate),
+        0b110 => Ok(CsrOp::ReadSetImmediate),
+        0b111 => Ok(CsrOp::ReadClearImmediate),
+        _ => Err(DecodeError::new(raw)),
+    }
+}
+
+fn decode_csr_address(raw: u32) -> Result<CsrAddress, DecodeError> {
+    let address = ((raw >> 20) & 0x0fff) as u16;
+    CsrAddress::try_from(address).map_err(|_error| DecodeError::new(raw))
+}
+
 const fn sign_extend(value: u32, bits: u32) -> i32 {
     let shift = 32 - bits;
     ((value << shift) as i32) >> shift
@@ -256,7 +284,7 @@ const fn imm_j(raw: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::decode;
-    use crate::{AluOp, SystemKind, opcode::InstructionKind};
+    use crate::{AluOp, CsrAddress, CsrOp, SystemKind, opcode::InstructionKind};
 
     #[test]
     fn decode_addi() {
@@ -278,5 +306,23 @@ mod tests {
     fn decode_mret() {
         let decoded = decode(0x3020_0073, 0).expect("mret should decode");
         assert_eq!(decoded.kind, InstructionKind::System(SystemKind::Mret));
+    }
+
+    #[test]
+    fn decode_csrrw() {
+        let decoded = decode(0x3001_10f3, 0).expect("csrrw should decode");
+        assert_eq!(decoded.kind, InstructionKind::Csr(CsrOp::ReadWrite));
+        assert_eq!(decoded.rd, Some(1));
+        assert_eq!(decoded.rs1, Some(2));
+        assert_eq!(decoded.csr, Some(CsrAddress::Mstatus));
+    }
+
+    #[test]
+    fn decode_csrrsi() {
+        let decoded = decode(0x3052_e173, 0).expect("csrrsi should decode");
+        assert_eq!(decoded.kind, InstructionKind::Csr(CsrOp::ReadSetImmediate));
+        assert_eq!(decoded.rd, Some(2));
+        assert_eq!(decoded.rs1, Some(5));
+        assert_eq!(decoded.csr, Some(CsrAddress::Mtvec));
     }
 }

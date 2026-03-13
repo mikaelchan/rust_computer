@@ -13,6 +13,10 @@ pub fn write_back(state: &mut HartState, payload: MemWbPayload) -> CommitEvent {
         let _result = return_from_trap(state);
         state.pc
     } else {
+        if let Some(write) = payload.csr_write {
+            state.csrs.write(write.address, write.value);
+        }
+
         if let (Some(rd), Some(value)) = (payload.decoded.rd, payload.writeback_value) {
             state.registers.write(rd, value);
         }
@@ -27,5 +31,6 @@ pub fn write_back(state: &mut HartState, payload: MemWbPayload) -> CommitEvent {
         kind: payload.decoded.kind,
         destination: payload.decoded.rd,
         value: payload.writeback_value,
+        csr_write: payload.csr_write,
     }
 }

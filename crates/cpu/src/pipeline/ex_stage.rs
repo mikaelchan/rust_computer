@@ -1,11 +1,15 @@
 use rvsim_isa::{AluOp, DecodedInstruction, Exception, SystemKind, Trap, opcode::InstructionKind};
 
-use crate::exec::{alu, branch, load_store};
+use crate::{
+    exec::{alu, branch, csr, load_store},
+    state::CsrFile,
+};
 
 /// Result produced by the execute stage before any memory access occurs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecuteOutcome {
     pub writeback_value: Option<u32>,
+    pub csr_write: Option<csr::CsrWrite>,
     pub memory_address: Option<u32>,
     pub store_value: u32,
     pub next_pc: u32,
@@ -45,6 +49,7 @@ pub fn writes_back(decoded: DecodedInstruction) -> bool {
             | InstructionKind::Load(_)
             | InstructionKind::OpImm(_)
             | InstructionKind::Op(_)
+            | InstructionKind::Csr(_)
     ) && decoded.rd.is_some()
         && decoded.rd != Some(0)
 }
@@ -56,36 +61,42 @@ pub fn execute(
     rs1_value: u32,
     rs2_value: u32,
     mepc: u32,
+    csrs: &CsrFile,
 ) -> ExecuteEvent {
     let next_pc = decoded.pc.wrapping_add(4);
 
     match decoded.kind {
         InstructionKind::Lui => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: Some(decoded.imm as u32),
+            csr_write: None,
             memory_address: None,
             store_value: 0,
             next_pc,
         }),
         InstructionKind::Auipc => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: Some(decoded.pc.wrapping_add_signed(decoded.imm)),
+            csr_write: None,
             memory_address: None,
             store_value: 0,
             next_pc,
         }),
         InstructionKind::Jal => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: Some(next_pc),
+            csr_write: None,
             memory_address: None,
             store_value: 0,
             next_pc: branch::branch_target(decoded.pc, decoded.imm),
         }),
         InstructionKind::Jalr => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: Some(next_pc),
+            csr_write: None,
             memory_address: None,
             store_value: 0,
             next_pc: load_store::effective_address(rs1_value, decoded.imm) & !1,
         }),
         InstructionKind::Branch(branch_kind) => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: None,
+            csr_write: None,
             memory_address: None,
             store_value: 0,
             next_pc: if branch::branch_taken(branch_kind, rs1_value, rs2_value) {
@@ -96,28 +107,43 @@ pub fn execute(
         }),
         InstructionKind::Load(_) => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: None,
+            csr_write: None,
             memory_address: Some(load_store::effective_address(rs1_value, decoded.imm)),
             store_value: 0,
             next_pc,
         }),
         InstructionKind::Store(_) => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: None,
+            csr_write: None,
             memory_address: Some(load_store::effective_address(rs1_value, decoded.imm)),
             store_value: rs2_value,
             next_pc,
         }),
         InstructionKind::OpImm(op) => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: Some(alu::execute_alu(op, rs1_value, immediate_rhs(op, decoded))),
+            csr_write: None,
             memory_address: None,
             store_value: 0,
             next_pc,
         }),
         InstructionKind::Op(op) => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: Some(alu::execute_alu(op, rs1_value, rs2_value)),
+            csr_write: None,
             memory_address: None,
             store_value: 0,
             next_pc,
         }),
+        InstructionKind::Csr(_op) => {
+            let outcome = csr::execute(decoded, csrs, rs1_value)
+                .expect("csr instruction should provide an address");
+            ExecuteEvent::Advance(ExecuteOutcome {
+                writeback_value: Some(outcome.read_value),
+                csr_write: outcome.write,
+                memory_address: None,
+                store_value: 0,
+                next_pc,
+            })
+        }
         InstructionKind::System(SystemKind::Ecall) => {
             ExecuteEvent::Trap(Trap::Exception(Exception::EnvironmentCallFromMMode))
         }
@@ -126,6 +152,7 @@ pub fn execute(
         }
         InstructionKind::System(SystemKind::Mret) => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: None,
+            csr_write: None,
             memory_address: None,
             store_value: 0,
             next_pc: mepc,
