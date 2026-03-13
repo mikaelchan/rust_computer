@@ -1,0 +1,10 @@
+[package]
+name = "rvsim-system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "rvsim_system"
+path = "src/lib.rs"

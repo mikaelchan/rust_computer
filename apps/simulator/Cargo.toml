@@ -1,0 +1,15 @@
+[package]
+name = "rvsim-simulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rvsim-cpu = { path = "../../crates/cpu" }
+rvsim-devices = { path = "../../crates/devices" }
+rvsim-system = { path = "../../crates/system" }
+
+[[bin]]
+name = "simulator"
+path = "src/main.rs"

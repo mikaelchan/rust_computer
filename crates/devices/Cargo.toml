@@ -1,0 +1,13 @@
+[package]
+name = "rvsim-devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rvsim-system = { path = "../system" }
+
+[lib]
+name = "rvsim_devices"
+path = "src/lib.rs"

@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "crates/isa",
+    "crates/system",
+    "crates/cpu",
+    "crates/devices",
+    "apps/simulator",
+]
+resolver = "3"
+
+[workspace.package]
+authors = ["Michael"]
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+version = "0.1.0"
