@@ -5,6 +5,7 @@ use core::fmt;
 /// Interrupt causes used by machine mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Interrupt {
+    MachineSoftware,
     MachineTimer,
     MachineExternal,
 }
@@ -31,6 +32,7 @@ impl Trap {
     #[must_use]
     pub const fn mcause(self) -> u32 {
         match self {
+            Self::Interrupt(Interrupt::MachineSoftware) => (1_u32 << 31) | 3,
             Self::Exception(Exception::InstructionAddressMisaligned { .. }) => 0,
             Self::Exception(Exception::IllegalInstruction { .. }) => 2,
             Self::Exception(Exception::Breakpoint) => 3,

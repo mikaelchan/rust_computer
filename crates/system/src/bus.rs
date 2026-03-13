@@ -8,6 +8,7 @@ pub type Address = u64;
 /// Interrupt lines exposed by memory-mapped devices to the CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptLine {
+    MachineSoftware,
     MachineTimer,
     MachineExternal,
 }
@@ -19,8 +20,9 @@ pub struct InterruptSet {
 }
 
 impl InterruptSet {
-    const MACHINE_TIMER_BIT: u8 = 1 << 0;
-    const MACHINE_EXTERNAL_BIT: u8 = 1 << 1;
+    const MACHINE_SOFTWARE_BIT: u8 = 1 << 0;
+    const MACHINE_TIMER_BIT: u8 = 1 << 1;
+    const MACHINE_EXTERNAL_BIT: u8 = 1 << 2;
 
     #[must_use]
     pub const fn empty() -> Self {
@@ -30,6 +32,7 @@ impl InterruptSet {
     #[must_use]
     pub const fn from_line(line: InterruptLine) -> Self {
         let bits = match line {
+            InterruptLine::MachineSoftware => Self::MACHINE_SOFTWARE_BIT,
             InterruptLine::MachineTimer => Self::MACHINE_TIMER_BIT,
             InterruptLine::MachineExternal => Self::MACHINE_EXTERNAL_BIT,
         };
@@ -40,6 +43,7 @@ impl InterruptSet {
     #[must_use]
     pub const fn contains(self, line: InterruptLine) -> bool {
         let mask = match line {
+            InterruptLine::MachineSoftware => Self::MACHINE_SOFTWARE_BIT,
             InterruptLine::MachineTimer => Self::MACHINE_TIMER_BIT,
             InterruptLine::MachineExternal => Self::MACHINE_EXTERNAL_BIT,
         };
@@ -58,6 +62,8 @@ impl InterruptSet {
     pub const fn highest_priority(self) -> Option<InterruptLine> {
         if self.contains(InterruptLine::MachineExternal) {
             Some(InterruptLine::MachineExternal)
+        } else if self.contains(InterruptLine::MachineSoftware) {
+            Some(InterruptLine::MachineSoftware)
         } else if self.contains(InterruptLine::MachineTimer) {
             Some(InterruptLine::MachineTimer)
         } else {

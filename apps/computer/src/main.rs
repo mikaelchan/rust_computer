@@ -1,5 +1,5 @@
 use rvsim_cpu::{CpuModel, ReferenceCore};
-use rvsim_devices::{InterruptController, Ram, Rom, SimpleUart};
+use rvsim_devices::{InterruptController, MachineSoftwareInterrupt, Ram, Rom, SimpleUart};
 use rvsim_isa::CsrAddress;
 use rvsim_system::{Bus, Machine, MemoryMap};
 
@@ -7,6 +7,7 @@ const RESET_VECTOR: u32 = 0x0000_0000;
 const RAM_BASE: u64 = 0x1000_0000;
 const UART_BASE: u64 = 0x2000_0000;
 const INTERRUPT_CONTROLLER_BASE: u64 = 0x4000_0000;
+const MSIP_BASE: u64 = 0x5000_0000;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let program = [
@@ -18,8 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0x0002_2283, // lw x5, 0(x4)
         0x0000_006f, // jal x0, 0
         0,
-        0x0020_0313, // addi x6, x0, 2
-        0x0000_006f, // jal x0, 0
+        0x0013_0313, // addi x6, x6, 1
+        0x3020_0073, // mret
     ];
 
     let mut memory = MemoryMap::new();
@@ -27,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     memory.map_device(Ram::new(RAM_BASE, 0x1000))?;
     memory.map_device(SimpleUart::new(UART_BASE))?;
     memory.map_device(InterruptController::new(INTERRUPT_CONTROLLER_BASE))?;
+    memory.map_device(MachineSoftwareInterrupt::new(MSIP_BASE))?;
 
     let cpu = ReferenceCore::new(RESET_VECTOR);
     let mut machine = Machine::new(cpu, memory);
@@ -39,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cpu_mut()
         .hart_state_mut()
         .csrs
-        .write(CsrAddress::Mie, 1 << 11);
+        .write(CsrAddress::Mie, (1 << 3) | (1 << 11));
     machine
         .cpu_mut()
         .hart_state_mut()
@@ -73,23 +75,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    let external_mcause = machine.cpu().hart_state().csrs.read(CsrAddress::Mcause);
     let claimed_source = machine.bus_mut().load32(INTERRUPT_CONTROLLER_BASE + 12)?;
     machine
         .bus_mut()
         .store32(INTERRUPT_CONTROLLER_BASE + 12, claimed_source)?;
 
+    machine.bus_mut().store32(MSIP_BASE, 1)?;
+
+    for _ in 0..3 {
+        let report = machine.step_cycle()?;
+        println!(
+            "cycle={} retired={} pc=0x{:08x}",
+            machine.clock().current(),
+            report.retired_instructions,
+            machine.cpu().hart_state().pc
+        );
+    }
+
+    let software_mcause = machine.cpu().hart_state().csrs.read(CsrAddress::Mcause);
+    machine.bus_mut().store32(MSIP_BASE, 0)?;
+
     println!(
-        "x3={} x5={} external_interrupt_seen={} claimed_source={} mepc=0x{:08x} mcause=0x{:08x}",
+        "x3={} x5={} interrupts_seen={} claimed_source={} external_mcause=0x{:08x} software_mcause=0x{:08x}",
         machine.cpu().hart_state().registers.read(3),
         machine.cpu().hart_state().registers.read(5),
         machine.cpu().hart_state().registers.read(6),
         claimed_source,
-        machine.cpu().hart_state().csrs.read(CsrAddress::Mepc),
-        machine.cpu().hart_state().csrs.read(CsrAddress::Mcause)
+        external_mcause,
+        software_mcause
     );
 
     println!(
-        "computer ready: ReferenceCore provides the architectural oracle and external devices now include a claim/complete interrupt controller"
+        "computer ready: ReferenceCore now demonstrates both claim/complete external interrupts and a machine software interrupt source"
     );
 
     Ok(())

@@ -7,8 +7,10 @@ const MSTATUS_MIE: u32 = 1 << 3;
 const MSTATUS_MPIE: u32 = 1 << 7;
 const MSTATUS_MPP_SHIFT: u32 = 11;
 const MSTATUS_MPP_MASK: u32 = 0b11 << MSTATUS_MPP_SHIFT;
+const MIE_MSIE: u32 = 1 << 3;
 const MIE_MEIE: u32 = 1 << 11;
 const MIE_MTIE: u32 = 1 << 7;
+const MIP_MSIP: u32 = 1 << 3;
 const MIP_MEIP: u32 = 1 << 11;
 const MIP_MTIP: u32 = 1 << 7;
 
@@ -69,10 +71,14 @@ impl CsrFile {
     }
 
     pub fn sync_interrupts(&mut self, interrupts: InterruptSet) {
-        self.machine.mip &= !(MIP_MEIP | MIP_MTIP);
+        self.machine.mip &= !(MIP_MSIP | MIP_MEIP | MIP_MTIP);
 
         if interrupts.contains(InterruptLine::MachineExternal) {
             self.machine.mip |= MIP_MEIP;
+        }
+
+        if interrupts.contains(InterruptLine::MachineSoftware) {
+            self.machine.mip |= MIP_MSIP;
         }
 
         if interrupts.contains(InterruptLine::MachineTimer) {
@@ -99,6 +105,10 @@ impl CsrFile {
             return Some(Interrupt::MachineExternal);
         }
 
+        if (self.machine.mie & MIE_MSIE) != 0 && (self.machine.mip & MIP_MSIP) != 0 {
+            return Some(Interrupt::MachineSoftware);
+        }
+
         if (self.machine.mie & MIE_MTIE) != 0 && (self.machine.mip & MIP_MTIP) != 0 {
             return Some(Interrupt::MachineTimer);
         }
@@ -119,6 +129,14 @@ impl CsrFile {
         matches!(
             self.pending_machine_interrupt(),
             Some(Interrupt::MachineExternal)
+        )
+    }
+
+    #[must_use]
+    pub fn machine_software_interrupt_enabled(&self) -> bool {
+        matches!(
+            self.pending_machine_interrupt(),
+            Some(Interrupt::MachineSoftware)
         )
     }
 
@@ -197,26 +215,44 @@ mod tests {
     fn syncs_pending_machine_interrupt_bits_from_interrupt_set() {
         let mut csrs = CsrFile::default();
         csrs.sync_interrupts(
-            InterruptSet::from(InterruptLine::MachineTimer)
+            InterruptSet::from(InterruptLine::MachineSoftware)
+                .union(InterruptSet::from(InterruptLine::MachineTimer))
                 .union(InterruptSet::from(InterruptLine::MachineExternal)),
         );
 
-        assert_eq!(csrs.read(CsrAddress::Mip), (1 << 7) | (1 << 11));
+        assert_eq!(csrs.read(CsrAddress::Mip), (1 << 3) | (1 << 7) | (1 << 11));
     }
 
     #[test]
-    fn prefers_machine_external_interrupt_over_machine_timer() {
+    fn prefers_machine_external_interrupt_over_software_and_timer() {
         let mut csrs = CsrFile::default();
         csrs.write(CsrAddress::Mstatus, 1 << 3);
-        csrs.write(CsrAddress::Mie, (1 << 7) | (1 << 11));
+        csrs.write(CsrAddress::Mie, (1 << 3) | (1 << 7) | (1 << 11));
         csrs.sync_interrupts(
-            InterruptSet::from(InterruptLine::MachineTimer)
+            InterruptSet::from(InterruptLine::MachineSoftware)
+                .union(InterruptSet::from(InterruptLine::MachineTimer))
                 .union(InterruptSet::from(InterruptLine::MachineExternal)),
         );
 
         assert_eq!(
             csrs.pending_machine_interrupt(),
             Some(Interrupt::MachineExternal)
+        );
+    }
+
+    #[test]
+    fn prefers_machine_software_interrupt_over_machine_timer() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mstatus, 1 << 3);
+        csrs.write(CsrAddress::Mie, (1 << 3) | (1 << 7));
+        csrs.sync_interrupts(
+            InterruptSet::from(InterruptLine::MachineSoftware)
+                .union(InterruptSet::from(InterruptLine::MachineTimer)),
+        );
+
+        assert_eq!(
+            csrs.pending_machine_interrupt(),
+            Some(Interrupt::MachineSoftware)
         );
     }
 }

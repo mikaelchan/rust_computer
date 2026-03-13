@@ -126,7 +126,7 @@ impl Processor for ReferenceCore {
 
 #[cfg(test)]
 mod tests {
-    use rvsim_devices::{InterruptController, MachineTimer, Rom};
+    use rvsim_devices::{InterruptController, MachineSoftwareInterrupt, MachineTimer, Rom};
     use rvsim_system::{AddressRange, Bus, InterruptLine, InterruptSet, Processor};
     use rvsim_system::{Machine, MemoryMap};
 
@@ -237,9 +237,38 @@ mod tests {
     }
 
     #[test]
-    fn interrupt_priority_prefers_machine_external_over_machine_timer() {
+    fn takes_machine_software_interrupt_when_enabled() {
         let mut bus = InterruptBus {
-            pending_interrupts: InterruptSet::from(InterruptLine::MachineTimer)
+            pending_interrupts: InterruptSet::from(InterruptLine::MachineSoftware),
+        };
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x40);
+
+        let report = core
+            .step_cycle(&mut bus)
+            .expect("software interrupt cycle should work");
+
+        assert_eq!(report.retired_instructions, 0);
+        assert_eq!(core.hart_state().pc, 0x40);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            (1_u32 << 31) | 3
+        );
+    }
+
+    #[test]
+    fn interrupt_priority_prefers_machine_external_over_software_and_timer() {
+        let mut bus = InterruptBus {
+            pending_interrupts: InterruptSet::from(InterruptLine::MachineSoftware)
+                .union(InterruptSet::from(InterruptLine::MachineTimer))
                 .union(InterruptSet::from(InterruptLine::MachineExternal)),
         };
         let mut core = ReferenceCore::new(0);
@@ -397,6 +426,72 @@ mod tests {
                 .csrs
                 .read(rvsim_isa::CsrAddress::Mcause),
             (1_u32 << 31) | 11
+        );
+    }
+
+    #[test]
+    fn machine_software_interrupt_device_interrupts_through_machine_wrapper() {
+        const MSIP_BASE: u64 = 0x5000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Rom::from_words(
+                0,
+                &[
+                    encode_jal(0, 0),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    encode_addi(10, 0, 3),
+                    encode_jal(0, 0),
+                ],
+            ))
+            .expect("rom should map");
+        memory
+            .map_device(MachineSoftwareInterrupt::new(MSIP_BASE))
+            .expect("msip device should map");
+
+        let mut machine = Machine::new(ReferenceCore::new(0), memory);
+        machine
+            .bus_mut()
+            .store32(MSIP_BASE, 1)
+            .expect("msip register should write");
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 3);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        machine
+            .step_cycle()
+            .expect("software interrupt should be taken");
+        machine
+            .step_cycle()
+            .expect("handler instruction should run");
+
+        assert_eq!(machine.cpu().hart_state().pc, 0x24);
+        assert_eq!(machine.cpu().hart_state().registers.read(10), 3);
+        assert_eq!(
+            machine
+                .cpu()
+                .hart_state()
+                .csrs
+                .read(rvsim_isa::CsrAddress::Mcause),
+            (1_u32 << 31) | 3
         );
     }
 
