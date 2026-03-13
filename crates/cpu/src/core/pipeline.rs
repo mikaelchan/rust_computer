@@ -3,20 +3,26 @@ use rvsim_system::{Bus, BusError, CpuCycle, Processor, SimComponent};
 
 use crate::{
     core::{CpuError, CpuModel},
-    exec::{ExecutionResult, apply_trap, execute_decoded},
-    hazard::structural::{StructuralHazardPolicy, fetch_blocked_by_memory_access},
+    exec::{ExecutionResult, apply_trap},
+    hazard::{
+        control::detect_branch_flush,
+        data::detect_raw_hazard,
+        structural::{StructuralHazardPolicy, fetch_blocked_by_memory_access},
+    },
     pipeline::{
-        ex_stage::classify,
+        ex_stage::{self, ExecuteEvent},
         id_stage::decode_stage,
         if_stage::fetch,
-        latches::{ExMemLatch, IdExLatch, IfIdLatch, MemWbLatch, PipelineLatches},
+        latches::{ExMemPayload, IdExPayload, MemWbPayload, PipelineLatches},
+        mem_stage::{self, MemoryEvent},
+        wb_stage,
     },
     predictor::{AlwaysNotTaken, BranchPredictor},
     state::HartState,
     trace::PipelineTrace,
 };
 
-/// A five-stage pipeline scaffold with explicit latch state and prediction hooks.
+/// A five-stage in-order pipeline with explicit latches and hazard handling.
 #[derive(Debug, Clone)]
 pub struct PipelineCore {
     reset_vector: u32,
@@ -54,30 +60,36 @@ impl PipelineCore {
         &self.last_trace
     }
 
-    fn update_latches(
-        &mut self,
-        raw: u32,
-        decoded: rvsim_isa::DecodedInstruction,
-        result: ExecutionResult,
-    ) {
-        self.latches.if_id = IfIdLatch {
-            pc: Some(decoded.pc),
-            raw: Some(raw),
+    fn forwarded_operand(
+        &self,
+        source: Option<u8>,
+        latched_value: u32,
+        ex_mem_payload: Option<ExMemPayload>,
+        mem_wb_payload: Option<MemWbPayload>,
+    ) -> u32 {
+        let Some(source) = source else {
+            return latched_value;
         };
-        self.latches.id_ex = IdExLatch {
-            decoded: Some(decoded),
-        };
-        self.latches.ex_mem = ExMemLatch {
-            destination: decoded.rd,
-            alu_result: Some(self.state.registers.read(decoded.rd.unwrap_or(0))),
-            memory_access: result.memory_access,
-        };
-        self.latches.mem_wb = MemWbLatch {
-            destination: decoded.rd,
-            value: decoded
-                .rd
-                .map(|register| self.state.registers.read(register)),
-        };
+
+        if source == 0 {
+            return 0;
+        }
+
+        if let Some(payload) = ex_mem_payload {
+            if payload.decoded.rd == Some(source) && ex_stage::writes_back(payload.decoded) {
+                if let Some(value) = payload.writeback_value {
+                    return value;
+                }
+            }
+        }
+
+        if let Some(payload) = mem_wb_payload {
+            if payload.decoded.rd == Some(source) && payload.writeback_value.is_some() {
+                return payload.writeback_value.unwrap_or(latched_value);
+            }
+        }
+
+        latched_value
     }
 }
 
@@ -118,9 +130,9 @@ impl Processor for PipelineCore {
         if self.state.halted {
             self.last_trace = PipelineTrace {
                 cycle: self.cycle,
-                fetched_pc: None,
-                retired_instructions: 0,
                 note: "halted",
+                fetch_stalled: true,
+                ..PipelineTrace::default()
             };
             return Ok(CpuCycle {
                 retired_instructions: 0,
@@ -128,88 +140,377 @@ impl Processor for PipelineCore {
             });
         }
 
-        let pc = self.state.pc;
-        let raw = match bus.load32(u64::from(pc)) {
-            Ok(raw) => raw,
-            Err(BusError::MisalignedAccess { .. }) => {
-                self.last_result = apply_trap(
-                    &mut self.state,
-                    Trap::Exception(Exception::InstructionAddressMisaligned { addr: pc }),
-                    pc,
-                );
-                self.last_trace = PipelineTrace {
-                    cycle: self.cycle,
-                    fetched_pc: Some(pc),
-                    retired_instructions: 0,
-                    note: "instruction address misaligned",
-                };
-                return Ok(CpuCycle {
-                    retired_instructions: 0,
-                    stalled: true,
-                });
+        let current = self.latches;
+        let writeback_pc = current.mem_wb.payload.map(|payload| payload.decoded.pc);
+        let memory_pc = current.ex_mem.payload.map(|payload| payload.decoded.pc);
+        let execute_pc = current.id_ex.payload.map(|payload| payload.decoded.pc);
+        let decode_pc = current.if_id.payload.map(|payload| payload.pc);
+
+        let mut next = PipelineLatches::default();
+        let mut next_fetch_pc = self.state.pc;
+        let mut retired_instructions = 0;
+        let mut fetch_stalled = false;
+        let mut decode_stalled = false;
+        let mut flushed = false;
+        let mut note = "progress";
+        let mut fetched_pc = None;
+        let mut trap_result = None;
+
+        if let Some(payload) = current.mem_wb.payload {
+            retired_instructions += wb_stage::write_back(&mut self.state, payload);
+        }
+
+        if let Some(payload) = current.ex_mem.payload {
+            fetch_stalled = fetch_blocked_by_memory_access(
+                self.structural_hazards.unified_memory,
+                ex_stage::uses_memory(payload.decoded),
+            );
+
+            match mem_stage::access(bus, payload)? {
+                MemoryEvent::Advance(payload) => {
+                    next.mem_wb.payload = Some(payload);
+                }
+                MemoryEvent::Trap(trap) => {
+                    trap_result = Some(apply_trap(&mut self.state, trap, payload.decoded.pc));
+                    next_fetch_pc = self.state.pc;
+                    flushed = true;
+                    note = "memory trap";
+                }
             }
-            Err(error) => return Err(error.into()),
-        };
+        }
 
-        let decoded = match decode_stage(raw, pc) {
-            Ok(decoded) => decoded,
-            Err(_error) => {
-                self.last_result = apply_trap(
-                    &mut self.state,
-                    Trap::Exception(Exception::IllegalInstruction { instruction: raw }),
-                    pc,
+        if !flushed {
+            if let Some(payload) = current.id_ex.payload {
+                let rs1_value = self.forwarded_operand(
+                    payload.decoded.rs1,
+                    payload.rs1_value,
+                    current.ex_mem.payload,
+                    current.mem_wb.payload,
                 );
-                self.last_trace = PipelineTrace {
-                    cycle: self.cycle,
-                    fetched_pc: Some(pc),
-                    retired_instructions: 0,
-                    note: "illegal instruction",
-                };
-                return Ok(CpuCycle {
-                    retired_instructions: 0,
-                    stalled: true,
-                });
+                let rs2_value = self.forwarded_operand(
+                    payload.decoded.rs2,
+                    payload.rs2_value,
+                    current.ex_mem.payload,
+                    current.mem_wb.payload,
+                );
+
+                match ex_stage::execute(payload.decoded, rs1_value, rs2_value) {
+                    ExecuteEvent::Advance(outcome) => {
+                        if matches!(payload.decoded.kind, InstructionKind::Branch(_)) {
+                            self.predictor.update(
+                                payload.decoded.pc,
+                                outcome.next_pc != payload.decoded.pc.wrapping_add(4),
+                            );
+                        }
+
+                        let flush_status =
+                            detect_branch_flush(payload.predicted_pc, outcome.next_pc);
+                        if flush_status.flush_required {
+                            flushed = true;
+                            next_fetch_pc = outcome.next_pc;
+                            note = "branch flush";
+                        }
+
+                        next.ex_mem.payload = Some(ExMemPayload {
+                            decoded: payload.decoded,
+                            writeback_value: outcome.writeback_value,
+                            memory_address: outcome.memory_address,
+                            store_value: outcome.store_value,
+                            next_pc: outcome.next_pc,
+                        });
+                    }
+                    ExecuteEvent::Trap(trap) => {
+                        trap_result = Some(apply_trap(&mut self.state, trap, payload.decoded.pc));
+                        next_fetch_pc = self.state.pc;
+                        flushed = true;
+                        note = "execute trap";
+                    }
+                }
             }
-        };
+        }
 
-        let fetch_output = fetch(bus, pc, pc.wrapping_add(4))?;
-        let execution_metadata = classify(
-            decoded,
-            self.state.registers.read(decoded.rs1.unwrap_or_default()),
-            self.state.registers.read(decoded.rs2.unwrap_or_default()),
-        );
+        if !flushed {
+            if let Some(payload) = current.if_id.payload {
+                match decode_stage(payload.raw, payload.pc) {
+                    Ok(decoded) => {
+                        let load_use_hazard = current
+                            .id_ex
+                            .payload
+                            .filter(|producer| ex_stage::is_load(producer.decoded))
+                            .map(|producer| {
+                                detect_raw_hazard(producer.decoded.rd, decoded.rs1, decoded.rs2)
+                            })
+                            .unwrap_or_default();
 
-        let structural_stall = fetch_blocked_by_memory_access(
-            self.structural_hazards.unified_memory,
-            matches!(
-                decoded.kind,
-                InstructionKind::Load(_) | InstructionKind::Store(_)
-            ),
-        );
+                        if load_use_hazard.stall {
+                            decode_stalled = true;
+                            next.if_id.payload = Some(payload);
+                            note = "load-use stall";
+                        } else {
+                            next.id_ex.payload = Some(IdExPayload {
+                                decoded,
+                                rs1_value: self
+                                    .state
+                                    .registers
+                                    .read(decoded.rs1.unwrap_or_default()),
+                                rs2_value: self
+                                    .state
+                                    .registers
+                                    .read(decoded.rs2.unwrap_or_default()),
+                                predicted_pc: payload.predicted_pc,
+                            });
+                        }
+                    }
+                    Err(_) => {
+                        trap_result = Some(apply_trap(
+                            &mut self.state,
+                            Trap::Exception(Exception::IllegalInstruction {
+                                instruction: payload.raw,
+                            }),
+                            payload.pc,
+                        ));
+                        next_fetch_pc = self.state.pc;
+                        flushed = true;
+                        note = "illegal instruction";
+                    }
+                }
+            }
+        }
 
-        let fallthrough = pc.wrapping_add(4);
-        let target = execution_metadata.branch_target.unwrap_or(fallthrough);
-        let prediction = self.predictor.predict(pc, fallthrough, target);
+        if flushed {
+            next.if_id.payload = None;
+            next.id_ex.payload = None;
+        } else if !decode_stalled && !fetch_stalled {
+            let fetch_pc = next_fetch_pc;
+            let prediction = self.predictor.predict(
+                fetch_pc,
+                fetch_pc.wrapping_add(4),
+                fetch_pc.wrapping_add(4),
+            );
 
-        self.last_result = execute_decoded(&mut self.state, bus, decoded)?;
-        self.update_latches(raw, decoded, self.last_result);
+            match fetch(bus, fetch_pc, prediction.target) {
+                Ok(payload) => {
+                    fetched_pc = Some(payload.pc);
+                    next.if_id.payload = Some(payload);
+                    next_fetch_pc = payload.predicted_pc;
+                }
+                Err(BusError::MisalignedAccess { .. }) => {
+                    trap_result = Some(apply_trap(
+                        &mut self.state,
+                        Trap::Exception(Exception::InstructionAddressMisaligned { addr: fetch_pc }),
+                        fetch_pc,
+                    ));
+                    next_fetch_pc = self.state.pc;
+                    note = "instruction address misaligned";
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else if fetch_stalled && note == "progress" {
+            note = "structural hazard";
+        }
 
+        self.state.pc = next_fetch_pc;
+        self.latches = next;
+        self.last_result = trap_result.unwrap_or(ExecutionResult {
+            retired: retired_instructions,
+            trap: None,
+            memory_access: current
+                .ex_mem
+                .payload
+                .map(|payload| ex_stage::uses_memory(payload.decoded))
+                .unwrap_or(false),
+        });
         self.last_trace = PipelineTrace {
             cycle: self.cycle,
-            fetched_pc: Some(fetch_output.pc),
-            retired_instructions: self.last_result.retired,
-            note: if structural_stall {
-                "structural hazard"
-            } else if prediction.taken {
-                "predicted taken"
-            } else {
-                "retired"
-            },
+            fetched_pc,
+            decode_pc,
+            execute_pc,
+            memory_pc,
+            writeback_pc,
+            retired_instructions,
+            fetch_stalled,
+            decode_stalled,
+            flushed,
+            note,
         };
 
         Ok(CpuCycle {
-            retired_instructions: self.last_result.retired,
-            stalled: structural_stall && self.last_result.retired == 0,
+            retired_instructions,
+            stalled: fetch_stalled || decode_stalled,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rvsim_system::{Bus, BusError, Processor};
+
+    use super::PipelineCore;
+    use crate::core::CpuModel;
+
+    #[derive(Debug, Clone)]
+    struct TestBus {
+        bytes: Vec<u8>,
+    }
+
+    impl TestBus {
+        fn new(size: usize) -> Self {
+            Self {
+                bytes: vec![0; size],
+            }
+        }
+
+        fn load_program(&mut self, program: &[u32]) {
+            for (index, word) in program.iter().copied().enumerate() {
+                let offset = index * 4;
+                self.bytes[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+            }
+        }
+    }
+
+    impl Bus for TestBus {
+        fn load8(&mut self, addr: u64) -> Result<u8, BusError> {
+            self.bytes
+                .get(addr as usize)
+                .copied()
+                .ok_or(BusError::UnmappedAddress { addr })
+        }
+
+        fn store8(&mut self, addr: u64, value: u8) -> Result<(), BusError> {
+            let slot = self
+                .bytes
+                .get_mut(addr as usize)
+                .ok_or(BusError::UnmappedAddress { addr })?;
+            *slot = value;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn forwards_alu_results_without_stalling() {
+        let mut bus = TestBus::new(64);
+        bus.load_program(&[
+            encode_addi(1, 0, 5),
+            encode_addi(2, 1, 7),
+            encode_add(3, 2, 1),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("pipeline cycle should work");
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 5);
+        assert_eq!(core.hart_state().registers.read(2), 12);
+        assert_eq!(core.hart_state().registers.read(3), 17);
+    }
+
+    #[test]
+    fn inserts_load_use_stall_and_then_forwards_loaded_value() {
+        let mut bus = TestBus::new(128);
+        bus.load_program(&[
+            encode_lui(1, 0),
+            encode_addi(2, 0, 9),
+            encode_sw(2, 1, 32),
+            encode_lw(3, 1, 32),
+            encode_add(4, 3, 3),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        let mut observed_decode_stall = false;
+        for _ in 0..12 {
+            core.step_cycle(&mut bus)
+                .expect("pipeline cycle should work");
+            observed_decode_stall |= core.last_trace().decode_stalled;
+        }
+
+        assert!(observed_decode_stall);
+        assert_eq!(core.hart_state().registers.read(3), 9);
+        assert_eq!(core.hart_state().registers.read(4), 18);
+    }
+
+    #[test]
+    fn flushes_wrong_path_after_taken_branch() {
+        let mut bus = TestBus::new(128);
+        bus.load_program(&[
+            encode_addi(1, 0, 1),
+            encode_beq(1, 1, 8),
+            encode_addi(2, 0, 99),
+            encode_addi(3, 0, 7),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        let mut observed_flush = false;
+        for _ in 0..12 {
+            core.step_cycle(&mut bus)
+                .expect("pipeline cycle should work");
+            observed_flush |= core.last_trace().flushed;
+        }
+
+        assert!(observed_flush);
+        assert_eq!(core.hart_state().registers.read(2), 0);
+        assert_eq!(core.hart_state().registers.read(3), 7);
+    }
+
+    fn encode_add(rd: u8, rs1: u8, rs2: u8) -> u32 {
+        encode_r(0b0000000, rs2, rs1, 0b000, rd, 0b0110011)
+    }
+
+    fn encode_addi(rd: u8, rs1: u8, imm: i16) -> u32 {
+        encode_i(imm, rs1, 0b000, rd, 0b0010011)
+    }
+
+    fn encode_lw(rd: u8, rs1: u8, imm: i16) -> u32 {
+        encode_i(imm, rs1, 0b010, rd, 0b0000011)
+    }
+
+    fn encode_lui(rd: u8, upper_20: u32) -> u32 {
+        (upper_20 << 12) | ((rd as u32) << 7) | 0b0110111
+    }
+
+    fn encode_sw(rs2: u8, rs1: u8, imm: i16) -> u32 {
+        let imm = imm as u16 as u32;
+        let imm_low = (imm & 0x1f) << 7;
+        let imm_high = ((imm >> 5) & 0x7f) << 25;
+        imm_high | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | (0b010 << 12) | imm_low | 0b0100011
+    }
+
+    fn encode_beq(rs1: u8, rs2: u8, imm: i16) -> u32 {
+        let imm = imm as u16 as u32;
+        let bit12 = ((imm >> 12) & 0x1) << 31;
+        let bit11 = ((imm >> 11) & 0x1) << 7;
+        let bits10_5 = ((imm >> 5) & 0x3f) << 25;
+        let bits4_1 = ((imm >> 1) & 0x0f) << 8;
+        bit12 | bits10_5 | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | bits4_1 | bit11 | 0b1100011
+    }
+
+    fn encode_jal(rd: u8, imm: i32) -> u32 {
+        let imm = imm as u32;
+        let bit20 = ((imm >> 20) & 0x1) << 31;
+        let bits10_1 = ((imm >> 1) & 0x03ff) << 21;
+        let bit11 = ((imm >> 11) & 0x1) << 20;
+        let bits19_12 = ((imm >> 12) & 0xff) << 12;
+        bit20 | bits19_12 | bit11 | bits10_1 | ((rd as u32) << 7) | 0b1101111
+    }
+
+    fn encode_i(imm: i16, rs1: u8, funct3: u32, rd: u8, opcode: u32) -> u32 {
+        (((imm as u16 as u32) & 0x0fff) << 20)
+            | ((rs1 as u32) << 15)
+            | (funct3 << 12)
+            | ((rd as u32) << 7)
+            | opcode
+    }
+
+    fn encode_r(funct7: u32, rs2: u8, rs1: u8, funct3: u32, rd: u8, opcode: u32) -> u32 {
+        (funct7 << 25)
+            | ((rs2 as u32) << 20)
+            | ((rs1 as u32) << 15)
+            | (funct3 << 12)
+            | ((rd as u32) << 7)
+            | opcode
     }
 }
