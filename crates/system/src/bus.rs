@@ -145,6 +145,27 @@ impl fmt::Display for BusError {
 
 impl std::error::Error for BusError {}
 
+/// A single bus transaction issued by a non-CPU bus master.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusMasterRequest {
+    Load32 { addr: Address },
+    Store32 { addr: Address, value: u32 },
+}
+
+/// Completion value returned to a non-CPU bus master.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusMasterResponse {
+    Load32(u32),
+    StoreComplete,
+}
+
+/// A peripheral-side initiator that can compete with the CPU for bus access.
+pub trait BusMaster {
+    fn name(&self) -> &'static str;
+    fn request(&mut self) -> Option<BusMasterRequest>;
+    fn on_response(&mut self, response: Result<BusMasterResponse, BusError>);
+}
+
 /// A memory-mapped device that can respond to byte loads and stores.
 pub trait Addressable {
     fn name(&self) -> &'static str;

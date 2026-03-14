@@ -1,6 +1,7 @@
 //! Address-decoded bus implementation for memory-mapped devices.
 
 use core::fmt;
+use std::{cell::RefCell, rc::Rc};
 
 use crate::bus::{AccessKind, Address, AddressRange, Addressable, Bus, BusError, InterruptSet};
 
@@ -8,6 +9,47 @@ struct DeviceSlot {
     range: AddressRange,
     name: &'static str,
     device: Box<dyn Addressable>,
+}
+
+struct SharedAddressable<D> {
+    inner: Rc<RefCell<D>>,
+}
+
+impl<D> Addressable for SharedAddressable<D>
+where
+    D: Addressable + 'static,
+{
+    fn name(&self) -> &'static str {
+        self.inner.borrow().name()
+    }
+
+    fn address_range(&self) -> AddressRange {
+        self.inner.borrow().address_range()
+    }
+
+    fn reset(&mut self) {
+        self.inner.borrow_mut().reset();
+    }
+
+    fn tick(&mut self) {
+        self.inner.borrow_mut().tick();
+    }
+
+    fn access_latency(&self, addr: Address, kind: AccessKind, width: usize) -> u32 {
+        self.inner.borrow().access_latency(addr, kind, width)
+    }
+
+    fn pending_interrupts(&self) -> InterruptSet {
+        self.inner.borrow().pending_interrupts()
+    }
+
+    fn load8(&mut self, addr: Address) -> Result<u8, BusError> {
+        self.inner.borrow_mut().load8(addr)
+    }
+
+    fn store8(&mut self, addr: Address, value: u8) -> Result<(), BusError> {
+        self.inner.borrow_mut().store8(addr, value)
+    }
 }
 
 /// A simple bus that routes accesses to the first mapped device that contains the address.
@@ -30,20 +72,46 @@ impl MemoryMap {
         D: Addressable + 'static,
     {
         let range = device.address_range();
+        let name = device.name();
+        self.ensure_range_available(range, name)?;
+        self.devices.push(DeviceSlot {
+            range,
+            name,
+            device: Box::new(device),
+        });
+        Ok(())
+    }
+
+    pub fn map_shared_device<D>(&mut self, device: Rc<RefCell<D>>) -> Result<(), BusError>
+    where
+        D: Addressable + 'static,
+    {
+        let borrowed = device.borrow();
+        let range = borrowed.address_range();
+        let name = borrowed.name();
+        drop(borrowed);
+        self.ensure_range_available(range, name)?;
+        self.devices.push(DeviceSlot {
+            range,
+            name,
+            device: Box::new(SharedAddressable { inner: device }),
+        });
+        Ok(())
+    }
+
+    fn ensure_range_available(
+        &self,
+        range: AddressRange,
+        name: &'static str,
+    ) -> Result<(), BusError> {
         for slot in &self.devices {
             if slot.range.overlaps(range) {
                 return Err(BusError::DeviceFault {
                     addr: range.start,
-                    message: format!("device {} overlaps with {}", device.name(), slot.name),
+                    message: format!("device {name} overlaps with {}", slot.name),
                 });
             }
         }
-
-        self.devices.push(DeviceSlot {
-            range,
-            name: device.name(),
-            device: Box::new(device),
-        });
         Ok(())
     }
 
@@ -224,6 +292,8 @@ impl fmt::Debug for MemoryMap {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
     use super::MemoryMap;
     use crate::{
         AccessKind, AddressRange, Addressable, Bus, BusError, InterruptLine, InterruptSet,
@@ -340,5 +410,27 @@ mod tests {
         map.tick();
         assert_eq!(map.load8(0x1000).expect("access should complete"), 9);
         assert!(!map.is_busy());
+    }
+
+    #[test]
+    fn routes_to_shared_devices() {
+        let shared = Rc::new(RefCell::new(CounterDevice {
+            range: AddressRange::new(0x3000, 4),
+            value: 1,
+            interrupts: InterruptSet::from(InterruptLine::MachineExternal),
+            latency_cycles: 0,
+        }));
+        let mut map = MemoryMap::new();
+        map.map_shared_device(Rc::clone(&shared))
+            .expect("shared device should map");
+
+        map.store8(0x3000, 5)
+            .expect("write should reach shared device");
+
+        assert_eq!(shared.borrow().value, 5);
+        assert_eq!(
+            map.pending_interrupts().highest_priority(),
+            Some(InterruptLine::MachineExternal)
+        );
     }
 }

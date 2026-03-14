@@ -41,11 +41,14 @@ The current baseline already has:
 
 ## Bus And Devices
 
-- [ ] Add bus arbitration for multiple bus masters.
-  This becomes necessary once DMA-capable devices or other autonomous peripherals are introduced.
+- [x] Add bus arbitration for multiple bus masters.
+  A new round-robin arbiter now sits in front of the memory map so autonomous devices can compete with the CPU for lower-bus cycles.
 
-- [ ] Add a DMA-capable external device.
-  This is the first meaningful consumer of a non-trivial bus arbitration model.
+- [x] Add a DMA-capable external device.
+  A simple MMIO-programmable DMA engine now issues memory-to-memory transfers through the shared arbiter and can raise a machine external interrupt on completion or fault.
+
+- [ ] Add cache maintenance or coherent DMA behavior.
+  The current DMA path intentionally uses non-cacheable buffers; future work should model either software-managed cache maintenance or hardware coherence.
 
 - [ ] Expand MMIO device coverage.
   Good candidates: block device, display/framebuffer, keyboard/input source, programmable timer variants, and storage-oriented test devices.
