@@ -129,26 +129,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         software_mcause
     );
     println!(
-        "cache stats: icache(hits={} misses={} refills={} evictions={} invalidations={}) dcache(hits={} misses={} refills={} evictions={} write_backs={} invalidations={})",
+        "cache stats: icache(hits={} misses={} refills={} refill_words={} bypassed_reads={} evictions={} invalidations={}) dcache(hits={} misses={} refills={} refill_words={} evictions={} dirty_evictions={} write_backs={} write_back_words={} bypassed_writes={} invalidations={})",
         machine.bus().stats().instruction.read_hits,
         machine.bus().stats().instruction.read_misses,
         machine.bus().stats().instruction.refills,
+        machine.bus().stats().instruction.refill_words,
+        machine.bus().stats().instruction.bypassed_reads,
         machine.bus().stats().instruction.evictions,
         machine.bus().stats().instruction.invalidations,
         machine.bus().stats().data.read_hits,
         machine.bus().stats().data.read_misses,
         machine.bus().stats().data.refills,
+        machine.bus().stats().data.refill_words,
         machine.bus().stats().data.evictions,
+        machine.bus().stats().data.dirty_evictions,
         machine.bus().stats().data.write_backs,
+        machine.bus().stats().data.write_back_words,
+        machine.bus().stats().data.bypassed_writes,
         machine.bus().stats().data.invalidations
     );
     println!(
-        "l2 stats: hits={} misses={} refills={} evictions={} write_backs={} invalidations={}",
+        "l2 stats: hits={} misses={} refills={} refill_words={} evictions={} dirty_evictions={} write_backs={} write_back_words={} bypassed_reads={} bypassed_writes={} invalidations={}",
         machine.bus().inner().stats().read_hits,
         machine.bus().inner().stats().read_misses,
         machine.bus().inner().stats().refills,
+        machine.bus().inner().stats().refill_words,
         machine.bus().inner().stats().evictions,
+        machine.bus().inner().stats().dirty_evictions,
         machine.bus().inner().stats().write_backs,
+        machine.bus().inner().stats().write_back_words,
+        machine.bus().inner().stats().bypassed_reads,
+        machine.bus().inner().stats().bypassed_writes,
         machine.bus().inner().stats().invalidations
     );
 

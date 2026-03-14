@@ -33,11 +33,11 @@ The current baseline already has:
 - [x] Add a memory-controller / DRAM timing model.
   A simple DRAM device now models row misses, row hits, and sequential burst accesses, and the example machine uses it for main memory.
 
-- [ ] Model refill/write-back traffic explicitly.
-  Cache refills already walk the backing bus word-by-word; the next step is making bus occupancy, burst behavior, and write-back traffic visible in stats and timing.
+- [x] Model refill/write-back traffic explicitly.
+  Cache stats now expose refill/write-back word counts, dirty evictions, and bypassed accesses so lower-level traffic is visible per cache level.
 
-- [ ] Add cache performance counters beyond hits/misses.
-  Useful next counters: stall cycles, refill words, write-backs, dirty evictions, bypassed accesses, and per-level access counts.
+- [x] Add cache performance counters beyond hits/misses.
+  Cache levels now report refill words, write-back words, dirty evictions, bypassed reads/writes, and per-level write-back traffic in addition to hits/misses.
 
 ## Bus And Devices
 

@@ -173,9 +173,14 @@ pub struct CacheStats {
     pub read_hits: u64,
     pub read_misses: u64,
     pub refills: u64,
+    pub refill_words: u64,
     pub evictions: u64,
+    pub dirty_evictions: u64,
     pub write_backs: u64,
+    pub write_back_words: u64,
     pub write_accesses: u64,
+    pub bypassed_reads: u64,
+    pub bypassed_writes: u64,
     pub invalidations: u64,
 }
 
@@ -498,6 +503,9 @@ impl CacheBank {
         if victim_valid {
             self.stats.evictions += 1;
         }
+        if self.config.write_policy == WritePolicy::WriteBack && victim_valid && victim_dirty {
+            self.stats.dirty_evictions += 1;
+        }
 
         let write_back =
             (self.config.write_policy == WritePolicy::WriteBack && victim_valid && victim_dirty)
@@ -544,7 +552,10 @@ impl CacheBank {
                 let word_addr =
                     write_back.line_base + (write_back.next_word_index * WORD_BYTES) as u64;
                 match inner.store32(word_addr, write_back.words[write_back.next_word_index]) {
-                    Ok(()) => write_back.next_word_index += 1,
+                    Ok(()) => {
+                        write_back.next_word_index += 1;
+                        self.stats.write_back_words += 1;
+                    }
                     Err(BusError::Busy { remaining_cycles }) => {
                         self.pending = Some(pending);
                         return Err(BusError::Busy { remaining_cycles });
@@ -568,6 +579,7 @@ impl CacheBank {
                 Ok(word) => {
                     pending.refill.words[pending.refill.next_word_index] = word;
                     pending.refill.next_word_index += 1;
+                    self.stats.refill_words += 1;
                 }
                 Err(BusError::Busy { remaining_cycles }) => {
                     self.pending = Some(pending);
@@ -642,6 +654,14 @@ impl CacheBank {
         self.stats.write_accesses += 1;
     }
 
+    fn note_bypassed_read(&mut self) {
+        self.stats.bypassed_reads += 1;
+    }
+
+    fn note_bypassed_write(&mut self) {
+        self.stats.bypassed_writes += 1;
+    }
+
     fn update_cached_store(
         &mut self,
         decoded: DecodedAddress,
@@ -664,6 +684,7 @@ impl CacheBank {
         self.note_write_access();
 
         if !self.caches_address(store.addr) || !self.caches_line_containing(store.addr) {
+            self.note_bypassed_write();
             return store.commit(inner);
         }
 
@@ -692,7 +713,10 @@ impl CacheBank {
         }
 
         match self.config.store_allocation_policy {
-            StoreAllocationPolicy::NoWriteAllocate => store.commit(inner),
+            StoreAllocationPolicy::NoWriteAllocate => {
+                self.note_bypassed_write();
+                store.commit(inner)
+            }
             StoreAllocationPolicy::WriteAllocate => {
                 self.start_pending(decoded, RefillKind::Load, false);
                 self.continue_pending(inner)?;
@@ -870,6 +894,7 @@ where
         }
 
         if !self.bank.caches_address(addr) || !self.bank.caches_line_containing(addr) {
+            self.bank.note_bypassed_read();
             return self.inner.fetch32(addr);
         }
 
@@ -879,6 +904,7 @@ where
 
     fn load8(&mut self, addr: Address) -> Result<u8, BusError> {
         if !self.bank.caches_address(addr) || !self.bank.caches_line_containing(addr) {
+            self.bank.note_bypassed_read();
             return self.inner.load8(addr);
         }
 
@@ -905,6 +931,7 @@ where
             || !self.bank.caches_address(addr + 1)
             || !self.bank.caches_line_containing(addr)
         {
+            self.bank.note_bypassed_read();
             return self.inner.load16(addr);
         }
 
@@ -917,6 +944,7 @@ where
         }
 
         if !self.bank.caches_address(addr) || !self.bank.caches_line_containing(addr) {
+            self.bank.note_bypassed_read();
             return self.inner.load32(addr);
         }
 
@@ -983,6 +1011,7 @@ where
 
         if !self.instruction.caches_address(addr) || !self.instruction.caches_line_containing(addr)
         {
+            self.instruction.note_bypassed_read();
             return self.inner.fetch32(addr);
         }
 
@@ -992,6 +1021,7 @@ where
 
     fn load8(&mut self, addr: Address) -> Result<u8, BusError> {
         if !self.data.caches_address(addr) || !self.data.caches_line_containing(addr) {
+            self.data.note_bypassed_read();
             return self.inner.load8(addr);
         }
 
@@ -1020,6 +1050,7 @@ where
             || !self.data.caches_address(addr + 1)
             || !self.data.caches_line_containing(addr)
         {
+            self.data.note_bypassed_read();
             return self.inner.load16(addr);
         }
 
@@ -1032,6 +1063,7 @@ where
         }
 
         if !self.data.caches_address(addr) || !self.data.caches_line_containing(addr) {
+            self.data.note_bypassed_read();
             return self.inner.load32(addr);
         }
 
@@ -1237,6 +1269,7 @@ mod tests {
         assert_eq!(cache.stats().read_misses, 1);
         assert_eq!(cache.stats().read_hits, 2);
         assert_eq!(cache.stats().refills, 1);
+        assert_eq!(cache.stats().refill_words, 1);
     }
 
     #[test]
@@ -1258,6 +1291,7 @@ mod tests {
         assert_eq!(retry_fetch32(&mut cache, 0), 0x0050_0093);
         assert_eq!(cache.stats().read_misses, 1);
         assert_eq!(cache.stats().refills, 1);
+        assert_eq!(cache.stats().refill_words, 4);
 
         assert_eq!(
             cache.fetch32(12).expect("line neighbor should hit"),
@@ -1297,6 +1331,8 @@ mod tests {
         assert_eq!(retry_load32(cache.inner_mut(), RAM_BASE), 9);
         assert_eq!(cache.stats().invalidations, 0);
         assert_eq!(cache.stats().refills, 1);
+        assert_eq!(cache.stats().refill_words, 1);
+        assert_eq!(cache.stats().bypassed_writes, 0);
     }
 
     #[test]
@@ -1318,10 +1354,12 @@ mod tests {
             .expect("cold no-write-allocate store should bypass");
         assert_eq!(cache.stats().refills, 0);
         assert_eq!(cache.stats().read_misses, 0);
+        assert_eq!(cache.stats().bypassed_writes, 1);
 
         assert_eq!(cache.load32(RAM_BASE).expect("first read should refill"), 7);
         assert_eq!(cache.stats().read_misses, 1);
         assert_eq!(cache.stats().refills, 1);
+        assert_eq!(cache.stats().refill_words, 1);
     }
 
     #[test]
@@ -1359,8 +1397,11 @@ mod tests {
             9
         );
         assert_eq!(cache.stats().evictions, 1);
+        assert_eq!(cache.stats().dirty_evictions, 1);
         assert_eq!(cache.stats().write_backs, 1);
+        assert_eq!(cache.stats().write_back_words, 1);
         assert_eq!(cache.stats().refills, 2);
+        assert_eq!(cache.stats().refill_words, 2);
     }
 
     #[test]
@@ -1420,6 +1461,7 @@ mod tests {
         assert_eq!(cache.stats().read_hits, 0);
         assert_eq!(cache.stats().read_misses, 0);
         assert_eq!(cache.stats().refills, 0);
+        assert_eq!(cache.stats().bypassed_reads, 1);
     }
 
     #[test]
@@ -1465,9 +1507,11 @@ mod tests {
         assert_eq!(stats.instruction.read_misses, 1);
         assert_eq!(stats.instruction.read_hits, 2);
         assert_eq!(stats.instruction.refills, 1);
+        assert_eq!(stats.instruction.refill_words, 4);
         assert_eq!(stats.data.read_misses, 1);
         assert_eq!(stats.data.read_hits, 2);
         assert_eq!(stats.data.refills, 1);
+        assert_eq!(stats.data.refill_words, 4);
     }
 
     #[test]
@@ -1559,12 +1603,15 @@ mod tests {
         let l1_stats = cache.stats();
         assert_eq!(l1_stats.instruction.read_misses, 3);
         assert_eq!(l1_stats.instruction.refills, 3);
+        assert_eq!(l1_stats.instruction.refill_words, 12);
         assert_eq!(l1_stats.data.read_misses, 3);
         assert_eq!(l1_stats.data.refills, 3);
+        assert_eq!(l1_stats.data.refill_words, 12);
 
         let l2_stats = cache.inner().stats();
         assert_eq!(l2_stats.read_misses, 4);
         assert_eq!(l2_stats.refills, 4);
+        assert_eq!(l2_stats.refill_words, 16);
         assert!(l2_stats.read_hits >= 20);
     }
 
