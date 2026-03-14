@@ -30,8 +30,8 @@ The current baseline already has:
 - [x] Add an L2 cache wrapper below the L1 cache.
   The cache wrappers are now used in a stacked hierarchy, with split L1 instruction/data caches over a unified L2 in the example machine and regression tests.
 
-- [ ] Add a memory-controller / DRAM timing model.
-  Start with a simple burst-based model, then optionally add bank/row behavior for more realistic miss latency studies.
+- [x] Add a memory-controller / DRAM timing model.
+  A simple DRAM device now models row misses, row hits, and sequential burst accesses, and the example machine uses it for main memory.
 
 - [ ] Model refill/write-back traffic explicitly.
   Cache refills already walk the backing bus word-by-word; the next step is making bus occupancy, burst behavior, and write-back traffic visible in stats and timing.

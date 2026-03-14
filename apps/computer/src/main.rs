@@ -1,9 +1,11 @@
 use rvsim_cpu::{CpuModel, ReferenceCore};
-use rvsim_devices::{InterruptController, MachineSoftwareInterrupt, Ram, Rom, SimpleUart};
+use rvsim_devices::{
+    Dram, DramConfig, InterruptController, MachineSoftwareInterrupt, Rom, SimpleUart,
+};
 use rvsim_isa::CsrAddress;
 use rvsim_system::{
-    AddressRange, Bus, CacheConfig, DirectMappedCache, Machine, MemoryMap, ReplacementPolicy,
-    SplitL1Cache, StoreAllocationPolicy, WritePolicy,
+    AddressRange, Bus, CacheConfig, CpuCycle, DirectMappedCache, Machine, MemoryMap, Processor,
+    ReplacementPolicy, SplitL1Cache, StoreAllocationPolicy, WritePolicy,
 };
 
 const RESET_VECTOR: u32 = 0x0000_0000;
@@ -34,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut memory = MemoryMap::new();
     memory.map_device(Rom::from_words(RESET_VECTOR as u64, &program))?;
-    memory.map_device(Ram::new(RAM_BASE, 0x1000))?;
+    memory.map_device(Dram::new(RAM_BASE, 0x1000, DramConfig::new(64, 6, 2, 1)))?;
     memory.map_device(SimpleUart::new(UART_BASE))?;
     memory.map_device(InterruptController::new(INTERRUPT_CONTROLLER_BASE))?;
     memory.map_device(MachineSoftwareInterrupt::new(MSIP_BASE))?;
@@ -87,15 +89,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .csrs
         .write(CsrAddress::Mtvec, 0x20);
 
-    for _ in 0..6 {
-        let report = machine.step_cycle()?;
-        println!(
-            "cycle={} retired={} pc=0x{:08x}",
-            machine.clock().current(),
-            report.retired_instructions,
-            machine.cpu().hart_state().pc
-        );
-    }
+    step_until(&mut machine, 64, |machine| {
+        machine.cpu().hart_state().registers.read(5) == 15
+    })?;
 
     machine
         .bus_mut()
@@ -104,15 +100,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .bus_mut()
         .store32(INTERRUPT_CONTROLLER_BASE + 8, 1)?;
 
-    for _ in 0..3 {
-        let report = machine.step_cycle()?;
-        println!(
-            "cycle={} retired={} pc=0x{:08x}",
-            machine.clock().current(),
-            report.retired_instructions,
-            machine.cpu().hart_state().pc
-        );
-    }
+    step_until(&mut machine, 64, |machine| {
+        machine.cpu().hart_state().registers.read(6) >= 1 && machine.cpu().hart_state().pc == 0x18
+    })?;
 
     let external_mcause = machine.cpu().hart_state().csrs.read(CsrAddress::Mcause);
     let claimed_source = machine.bus_mut().load32(INTERRUPT_CONTROLLER_BASE + 12)?;
@@ -122,15 +112,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     machine.bus_mut().store32(MSIP_BASE, 1)?;
 
-    for _ in 0..3 {
-        let report = machine.step_cycle()?;
-        println!(
-            "cycle={} retired={} pc=0x{:08x}",
-            machine.clock().current(),
-            report.retired_instructions,
-            machine.cpu().hart_state().pc
-        );
-    }
+    step_until(&mut machine, 64, |machine| {
+        machine.cpu().hart_state().registers.read(6) >= 2 && machine.cpu().hart_state().pc == 0x18
+    })?;
 
     let software_mcause = machine.cpu().hart_state().csrs.read(CsrAddress::Mcause);
     machine.bus_mut().store32(MSIP_BASE, 0)?;
@@ -171,6 +155,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "computer ready: ReferenceCore now demonstrates split L1 caches over a unified L2 plus external and software interrupts"
     );
+
+    Ok(())
+}
+
+fn step_until<P, B, F>(
+    machine: &mut Machine<P, B>,
+    max_cycles: usize,
+    mut predicate: F,
+) -> Result<(), P::Error>
+where
+    P: Processor + CpuModel,
+    B: Bus,
+    F: FnMut(&Machine<P, B>) -> bool,
+{
+    for _ in 0..max_cycles {
+        let report: CpuCycle = machine.step_cycle()?;
+        println!(
+            "cycle={} retired={} pc=0x{:08x}",
+            machine.clock().current(),
+            report.retired_instructions,
+            machine.cpu().hart_state().pc
+        );
+        if predicate(machine) {
+            return Ok(());
+        }
+    }
 
     Ok(())
 }
