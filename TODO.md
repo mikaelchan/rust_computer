@@ -72,5 +72,5 @@ The current baseline already has:
 - [x] Add a small architecture test program suite.
   Versioned RV32 program images now live under `crates/cpu/tests/programs`, and integration tests run them against both the reference and pipeline cores.
 
-- [ ] Add more user-facing documentation for memory experiments.
-  Document recommended machine configurations, cache policies, and expected timing behavior for common research scenarios.
+- [x] Add more user-facing documentation for memory experiments.
+  `docs/memory_experiments.md` now documents recommended configurations, cache policies, expected timing behavior, and the `memory_microbench` workflow.
