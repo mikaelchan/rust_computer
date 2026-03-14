@@ -29,6 +29,7 @@ struct InFlightRequest {
     master_index: usize,
     request: BusMasterRequest,
     request_id: RequestId,
+    completion: Option<Result<BusMasterResponse, BusError>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +48,10 @@ where
 {
     fn name(&self) -> &'static str {
         self.inner.borrow().name()
+    }
+
+    fn max_outstanding_requests(&self) -> usize {
+        self.inner.borrow().max_outstanding_requests()
     }
 
     fn request(&mut self) -> Option<BusMasterRequest> {
@@ -197,14 +202,16 @@ where
         }
     }
 
-    fn master_has_outstanding_request(&self, master_index: usize) -> bool {
-        self.pending_request
-            .as_ref()
-            .is_some_and(|pending| pending.master_index == master_index)
-            || self
-                .in_flight_requests
-                .iter()
-                .any(|active| active.master_index == master_index)
+    fn outstanding_request_count_for_master(&self, master_index: usize) -> usize {
+        usize::from(
+            self.pending_request
+                .as_ref()
+                .is_some_and(|pending| pending.master_index == master_index),
+        ) + self
+            .in_flight_requests
+            .iter()
+            .filter(|active| active.master_index == master_index)
+            .count()
     }
 
     fn try_submit_pending_request(&mut self) {
@@ -230,6 +237,7 @@ where
                     master_index: pending.master_index,
                     request: pending.request,
                     request_id,
+                    completion: None,
                 });
                 self.pending_request = None;
             }
@@ -244,28 +252,55 @@ where
     }
 
     fn poll_in_flight_requests(&mut self) {
-        let mut index = 0;
-        while index < self.in_flight_requests.len() {
-            let active = &self.in_flight_requests[index];
-            let result = match active.request_id {
-                RequestId::Transaction(id) => {
-                    self.inner.take_transaction_response(id).map(|result| {
-                        result.and_then(|response| {
-                            Self::response_from_transaction(&active.request, response)
-                        })
-                    })
-                }
-                RequestId::Burst(id) => self.inner.take_burst_response(id).map(|result| {
-                    result.and_then(|response| Self::response_from_burst(&active.request, response))
-                }),
-            };
-            let Some(result) = result else {
-                index += 1;
+        for index in 0..self.in_flight_requests.len() {
+            if self.in_flight_requests[index].completion.is_some() {
                 continue;
+            }
+
+            let result = {
+                let active = &self.in_flight_requests[index];
+                match active.request_id {
+                    RequestId::Transaction(id) => {
+                        self.inner.take_transaction_response(id).map(|result| {
+                            result.and_then(|response| {
+                                Self::response_from_transaction(&active.request, response)
+                            })
+                        })
+                    }
+                    RequestId::Burst(id) => self.inner.take_burst_response(id).map(|result| {
+                        result.and_then(|response| {
+                            Self::response_from_burst(&active.request, response)
+                        })
+                    }),
+                }
             };
 
-            let active = self.in_flight_requests.swap_remove(index);
-            self.masters[active.master_index].master.on_response(result);
+            if let Some(result) = result {
+                self.in_flight_requests[index].completion = Some(result);
+            }
+        }
+
+        let mut index = 0;
+        while index < self.in_flight_requests.len() {
+            if self.in_flight_requests[index].completion.is_none() {
+                index += 1;
+                continue;
+            }
+
+            let master_index = self.in_flight_requests[index].master_index;
+            if self.in_flight_requests[..index]
+                .iter()
+                .any(|active| active.master_index == master_index)
+            {
+                index += 1;
+                continue;
+            }
+
+            let active = self.in_flight_requests.remove(index);
+            let result = active
+                .completion
+                .expect("ready completion should stay attached to in-flight request");
+            self.masters[master_index].master.on_response(result);
         }
     }
 
@@ -276,7 +311,8 @@ where
 
         for offset in 0..self.masters.len() {
             let index = (self.next_master_index + offset) % self.masters.len();
-            if self.master_has_outstanding_request(index) {
+            let max_outstanding = self.masters[index].master.max_outstanding_requests().max(1);
+            if self.outstanding_request_count_for_master(index) >= max_outstanding {
                 continue;
             }
             if let Some(request) = self.masters[index].master.request() {
@@ -426,9 +462,9 @@ mod tests {
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
     use crate::{
-        BurstBus, BurstPhase, BurstRequest, BurstResponse, Bus, BusMaster, BusMasterRequest,
-        BusMasterResponse, TransactionBus, TransactionPhase, TransactionRequest,
-        TransactionResponse,
+        AccessKind, AddressRange, Addressable, BurstBus, BurstPhase, BurstRequest, BurstResponse,
+        Bus, BusError, BusMaster, BusMasterRequest, BusMasterResponse, MemoryMap, TransactionBus,
+        TransactionPhase, TransactionRequest, TransactionResponse,
     };
 
     use super::ArbiterBus;
@@ -833,9 +869,49 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
+    struct ByteArrayDevice {
+        range: AddressRange,
+        bytes: Vec<u8>,
+        latency_cycles: u32,
+    }
+
+    impl Addressable for ByteArrayDevice {
+        fn name(&self) -> &'static str {
+            "byte-array"
+        }
+
+        fn address_range(&self) -> AddressRange {
+            self.range
+        }
+
+        fn load8(&mut self, addr: u64) -> Result<u8, BusError> {
+            let offset = (addr - self.range.start) as usize;
+            self.bytes
+                .get(offset)
+                .copied()
+                .ok_or(BusError::UnmappedAddress { addr })
+        }
+
+        fn store8(&mut self, addr: u64, value: u8) -> Result<(), BusError> {
+            let offset = (addr - self.range.start) as usize;
+            let byte = self
+                .bytes
+                .get_mut(offset)
+                .ok_or(BusError::UnmappedAddress { addr })?;
+            *byte = value;
+            Ok(())
+        }
+
+        fn access_latency(&self, _addr: u64, _kind: AccessKind, _width: usize) -> u32 {
+            self.latency_cycles
+        }
+    }
+
+    #[derive(Debug)]
     struct ScriptedMaster {
         name: &'static str,
+        max_outstanding_requests: usize,
         requests: VecDeque<BusMasterRequest>,
         completions: Vec<BusMasterResponse>,
     }
@@ -847,15 +923,25 @@ mod tests {
         ) -> Self {
             Self {
                 name,
+                max_outstanding_requests: 1,
                 requests: requests.into_iter().collect(),
                 completions: Vec::new(),
             }
+        }
+
+        fn with_request_window(mut self, max_outstanding_requests: usize) -> Self {
+            self.max_outstanding_requests = max_outstanding_requests;
+            self
         }
     }
 
     impl BusMaster for ScriptedMaster {
         fn name(&self) -> &'static str {
             self.name
+        }
+
+        fn max_outstanding_requests(&self) -> usize {
+            self.max_outstanding_requests
         }
 
         fn request(&mut self) -> Option<BusMasterRequest> {
@@ -980,6 +1066,63 @@ mod tests {
         assert_eq!(
             arbiter.load32(0).expect("master store should complete"),
             0xdead_beef
+        );
+    }
+
+    #[test]
+    fn preserves_in_order_responses_for_multi_outstanding_master_requests() {
+        let master = Rc::new(RefCell::new(
+            ScriptedMaster::with_requests(
+                "reader",
+                [
+                    BusMasterRequest::Load32 { addr: 0x1000 },
+                    BusMasterRequest::Load32 { addr: 0x2000 },
+                ],
+            )
+            .with_request_window(2),
+        ));
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(ByteArrayDevice {
+                range: AddressRange::new(0x1000, 4),
+                bytes: 0x1122_3344u32.to_le_bytes().to_vec(),
+                latency_cycles: 4,
+            })
+            .expect("slow device should map");
+        memory
+            .map_device(ByteArrayDevice {
+                range: AddressRange::new(0x2000, 4),
+                bytes: 0x5566_7788u32.to_le_bytes().to_vec(),
+                latency_cycles: 0,
+            })
+            .expect("fast device should map");
+
+        let mut arbiter = ArbiterBus::new(memory);
+        arbiter.add_shared_master(Rc::clone(&master));
+
+        arbiter.tick();
+        arbiter.tick();
+        assert_eq!(
+            arbiter.stats().master_grants,
+            2,
+            "master should issue a second request before the first one completes"
+        );
+        assert!(
+            master.borrow().completions.is_empty(),
+            "responses should still be pending after the second grant"
+        );
+
+        for _ in 0..6 {
+            arbiter.tick();
+        }
+
+        assert_eq!(
+            master.borrow().completions,
+            vec![
+                BusMasterResponse::Load32(0x1122_3344),
+                BusMasterResponse::Load32(0x5566_7788),
+            ]
         );
     }
 }

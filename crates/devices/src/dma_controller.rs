@@ -1,23 +1,47 @@
+use std::collections::VecDeque;
+
 use rvsim_system::{
     Address, AddressRange, Addressable, BusError, BusMaster, BusMasterRequest, BusMasterResponse,
     InterruptLine, InterruptSet,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum DmaPhase {
-    ReadBurst { beats: usize },
-    WriteBurst { words: Box<[u32]> },
+struct PendingWriteBurst {
+    destination: Address,
+    words: Box<[u32]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IssuedDmaRequest {
+    ReadBurst { destination: Address, beats: usize },
+    WriteBurst { beats: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveTransfer {
-    source: Address,
-    destination: Address,
+    next_source: Address,
+    next_destination: Address,
     remaining_words: u32,
-    phase: DmaPhase,
+    ready_writes: VecDeque<PendingWriteBurst>,
+    issued_requests: VecDeque<IssuedDmaRequest>,
 }
 
-/// A simple memory-to-memory DMA engine with one in-flight transfer.
+impl ActiveTransfer {
+    fn buffered_read_bursts(&self) -> usize {
+        self.ready_writes.len()
+            + self
+                .issued_requests
+                .iter()
+                .filter(|request| matches!(request, IssuedDmaRequest::ReadBurst { .. }))
+                .count()
+    }
+
+    fn is_complete(&self) -> bool {
+        self.remaining_words == 0 && self.ready_writes.is_empty() && self.issued_requests.is_empty()
+    }
+}
+
+/// A simple memory-to-memory DMA engine with bounded read-ahead bursts.
 #[derive(Debug, Clone)]
 pub struct DmaController {
     range: AddressRange,
@@ -33,6 +57,7 @@ pub struct DmaController {
 
 impl DmaController {
     const MAX_BURST_WORDS: usize = 8;
+    const MAX_OUTSTANDING_REQUESTS: usize = 4;
 
     pub const SOURCE_OFFSET: Address = 0;
     pub const DESTINATION_OFFSET: Address = 4;
@@ -135,12 +160,11 @@ impl DmaController {
         }
 
         self.active = Some(ActiveTransfer {
-            source: u64::from(self.source),
-            destination: u64::from(self.destination),
+            next_source: u64::from(self.source),
+            next_destination: u64::from(self.destination),
             remaining_words: self.length_words,
-            phase: DmaPhase::ReadBurst {
-                beats: Self::burst_words(self.length_words),
-            },
+            ready_writes: VecDeque::new(),
+            issued_requests: VecDeque::new(),
         });
     }
 
@@ -225,17 +249,58 @@ impl BusMaster for DmaController {
         "dma-controller"
     }
 
+    fn max_outstanding_requests(&self) -> usize {
+        Self::MAX_OUTSTANDING_REQUESTS
+    }
+
     fn request(&mut self) -> Option<BusMasterRequest> {
-        let active = self.active.as_ref()?;
-        Some(match active.phase {
-            DmaPhase::ReadBurst { beats } => BusMasterRequest::ReadWords {
-                base_addr: active.source,
+        let active = self.active.as_mut()?;
+
+        if !active.ready_writes.is_empty()
+            && (active.remaining_words == 0
+                || active.buffered_read_bursts() >= Self::MAX_OUTSTANDING_REQUESTS)
+        {
+            let write = active
+                .ready_writes
+                .pop_front()
+                .expect("checked that a pending write is available");
+            let beats = write.words.len();
+            active
+                .issued_requests
+                .push_back(IssuedDmaRequest::WriteBurst { beats });
+            return Some(BusMasterRequest::WriteWords {
+                base_addr: write.destination,
+                words: write.words,
+            });
+        }
+
+        if active.remaining_words > 0
+            && active.buffered_read_bursts() < Self::MAX_OUTSTANDING_REQUESTS
+        {
+            let beats = Self::burst_words(active.remaining_words);
+            let source = active.next_source;
+            let destination = active.next_destination;
+            let advance_words = beats as u32;
+            active.next_source += u64::from(advance_words) * 4;
+            active.next_destination += u64::from(advance_words) * 4;
+            active.remaining_words -= advance_words;
+            active
+                .issued_requests
+                .push_back(IssuedDmaRequest::ReadBurst { destination, beats });
+            return Some(BusMasterRequest::ReadWords {
+                base_addr: source,
                 beats,
-            },
-            DmaPhase::WriteBurst { ref words } => BusMasterRequest::WriteWords {
-                base_addr: active.destination,
-                words: words.clone(),
-            },
+            });
+        }
+
+        let write = active.ready_writes.pop_front()?;
+        let beats = write.words.len();
+        active
+            .issued_requests
+            .push_back(IssuedDmaRequest::WriteBurst { beats });
+        Some(BusMasterRequest::WriteWords {
+            base_addr: write.destination,
+            words: write.words,
         })
     }
 
@@ -244,34 +309,57 @@ impl BusMaster for DmaController {
             return;
         };
 
-        match response {
-            Ok(BusMasterResponse::ReadWords(words)) => {
-                active.phase = DmaPhase::WriteBurst { words };
-                self.active = Some(active);
-            }
-            Ok(BusMasterResponse::WriteWordsComplete { beats }) => {
-                let beats = beats as u32;
-                active.source += u64::from(beats) * 4;
-                active.destination += u64::from(beats) * 4;
-                active.remaining_words -= beats;
-                self.transferred_words += beats;
+        let Some(issued_request) = active.issued_requests.pop_front() else {
+            self.error = true;
+            return;
+        };
 
-                if active.remaining_words == 0 {
-                    self.done = true;
-                } else {
-                    active.phase = DmaPhase::ReadBurst {
-                        beats: Self::burst_words(active.remaining_words),
-                    };
-                    self.active = Some(active);
-                }
+        match (issued_request, response) {
+            (
+                IssuedDmaRequest::ReadBurst { destination, beats },
+                Ok(BusMasterResponse::ReadWords(words)),
+            ) if words.len() == beats => {
+                active
+                    .ready_writes
+                    .push_back(PendingWriteBurst { destination, words });
             }
-            Ok(BusMasterResponse::Load32(_)) | Ok(BusMasterResponse::StoreComplete) => {
-                self.error = true;
+            (
+                IssuedDmaRequest::WriteBurst { beats },
+                Ok(BusMasterResponse::WriteWordsComplete {
+                    beats: completed_beats,
+                }),
+            ) if completed_beats == beats => {
+                self.transferred_words += beats as u32;
             }
-            Err(_) => {
+            (
+                IssuedDmaRequest::ReadBurst { .. },
+                Ok(BusMasterResponse::Load32(_) | BusMasterResponse::StoreComplete),
+            )
+            | (
+                IssuedDmaRequest::WriteBurst { .. },
+                Ok(BusMasterResponse::Load32(_) | BusMasterResponse::StoreComplete),
+            )
+            | (
+                IssuedDmaRequest::ReadBurst { .. },
+                Ok(BusMasterResponse::WriteWordsComplete { .. }),
+            )
+            | (IssuedDmaRequest::WriteBurst { .. }, Ok(BusMasterResponse::ReadWords(_)))
+            | (_, Err(_)) => {
                 self.error = true;
+                return;
+            }
+            _ => {
+                self.error = true;
+                return;
             }
         }
+
+        if active.is_complete() {
+            self.done = true;
+            return;
+        }
+
+        self.active = Some(active);
     }
 }
 
@@ -279,14 +367,34 @@ impl BusMaster for DmaController {
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
-    use rvsim_system::{ArbiterBus, Bus, InterruptLine, MemoryMap};
+    use rvsim_system::{ArbiterBus, Bus, BusError, InterruptLine, MemoryMap};
 
-    use crate::Ram;
+    use crate::{LatencyAdapter, Ram};
 
     use super::DmaController;
 
     const RAM_BASE: u64 = 0x1000_0000;
     const DMA_BASE: u64 = 0x4000_0000;
+
+    fn blocking_store32(bus: &mut ArbiterBus<MemoryMap>, addr: u64, value: u32) {
+        loop {
+            match bus.store32(addr, value) {
+                Ok(()) => return,
+                Err(BusError::Busy { .. }) => bus.tick(),
+                Err(error) => panic!("store32 at 0x{addr:08x} failed: {error:?}"),
+            }
+        }
+    }
+
+    fn blocking_load32(bus: &mut ArbiterBus<MemoryMap>, addr: u64) -> u32 {
+        loop {
+            match bus.load32(addr) {
+                Ok(value) => return value,
+                Err(BusError::Busy { .. }) => bus.tick(),
+                Err(error) => panic!("load32 at 0x{addr:08x} failed: {error:?}"),
+            }
+        }
+    }
 
     #[test]
     fn copies_words_and_raises_completion_interrupt() {
@@ -449,6 +557,74 @@ mod tests {
                 bus.load32(RAM_BASE + 0x80 + (index as u64 * 4))
                     .expect("copied word should read"),
                 [0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444][index]
+            );
+        }
+    }
+
+    #[test]
+    fn overlaps_multiple_dma_bursts_on_high_latency_memory() {
+        let dma = Rc::new(RefCell::new(DmaController::new(DMA_BASE)));
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(LatencyAdapter::new(Ram::new(RAM_BASE, 0x400), 3))
+            .expect("RAM should map");
+        memory
+            .map_shared_device(Rc::clone(&dma))
+            .expect("DMA should map");
+
+        let mut bus = ArbiterBus::new(memory);
+        bus.add_shared_master(Rc::clone(&dma));
+
+        for index in 0..24 {
+            blocking_store32(
+                &mut bus,
+                RAM_BASE + (index as u64 * 4),
+                0x1000_0000 + index as u32,
+            );
+        }
+
+        bus.store32(DMA_BASE + DmaController::SOURCE_OFFSET, RAM_BASE as u32)
+            .expect("DMA source should program");
+        bus.store32(
+            DMA_BASE + DmaController::DESTINATION_OFFSET,
+            (RAM_BASE + 0x100) as u32,
+        )
+        .expect("DMA destination should program");
+        bus.store32(DMA_BASE + DmaController::LENGTH_OFFSET, 24)
+            .expect("DMA length should program");
+        bus.store32(
+            DMA_BASE + DmaController::CONTROL_OFFSET,
+            DmaController::CONTROL_START,
+        )
+        .expect("DMA control should start transfer");
+
+        for _ in 0..3 {
+            bus.tick();
+        }
+
+        assert!(
+            dma.borrow().is_busy(),
+            "DMA should still be active while multiple reads are in flight"
+        );
+        assert_eq!(
+            bus.stats().master_grants,
+            3,
+            "DMA should issue multiple bursts before the first response completes"
+        );
+
+        for _ in 0..128 {
+            bus.tick();
+            if dma.borrow().is_done() {
+                break;
+            }
+        }
+
+        assert!(dma.borrow().is_done(), "{:?}", dma.borrow());
+        assert!(!dma.borrow().has_error());
+        for index in 0..24 {
+            assert_eq!(
+                blocking_load32(&mut bus, RAM_BASE + 0x100 + (index as u64 * 4)),
+                0x1000_0000 + index as u32
             );
         }
     }

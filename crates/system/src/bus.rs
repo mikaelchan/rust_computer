@@ -327,6 +327,14 @@ pub enum BusMasterResponse {
 /// A peripheral-side initiator that can compete with the CPU for bus access.
 pub trait BusMaster {
     fn name(&self) -> &'static str;
+
+    /// Return the maximum number of requests that may remain unresolved at once.
+    ///
+    /// Values below one are treated as a single outstanding request by arbiters.
+    fn max_outstanding_requests(&self) -> usize {
+        1
+    }
+
     fn request(&mut self) -> Option<BusMasterRequest>;
     fn on_response(&mut self, response: Result<BusMasterResponse, BusError>);
 }
