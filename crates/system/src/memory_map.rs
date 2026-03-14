@@ -4,8 +4,8 @@ use core::fmt;
 use std::{cell::RefCell, rc::Rc};
 
 use crate::bus::{
-    AccessKind, Address, AddressRange, Addressable, Bus, BusError, InterruptSet, TransactionPhase,
-    TransactionRequest, TransactionResponse,
+    AccessKind, Address, AddressRange, Addressable, BurstPhase, BurstRequest, BurstResponse, Bus,
+    BusError, InterruptSet, TransactionPhase, TransactionRequest, TransactionResponse,
 };
 
 struct DeviceSlot {
@@ -20,6 +20,22 @@ struct ActiveTransaction {
     device_index: usize,
     request: TransactionRequest,
     phase: TransactionPhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveBurst {
+    id: u64,
+    device_index: usize,
+    request: BurstRequest,
+    beat_index: usize,
+    read_words: Box<[u32]>,
+    phase: BurstPhase,
+}
+
+enum BeatAdvance {
+    Phase(BurstPhase),
+    Completed(Option<u32>),
+    Failed(BusError),
 }
 
 struct SharedAddressable<D> {
@@ -68,6 +84,7 @@ where
 pub struct MemoryMap {
     devices: Vec<DeviceSlot>,
     active_transaction: Option<ActiveTransaction>,
+    active_burst: Option<ActiveBurst>,
     next_transaction_id: u64,
 }
 
@@ -128,6 +145,7 @@ impl MemoryMap {
 
     pub fn reset(&mut self) {
         self.active_transaction = None;
+        self.active_burst = None;
         self.next_transaction_id = 0;
         for slot in &mut self.devices {
             slot.device.reset();
@@ -220,7 +238,25 @@ impl MemoryMap {
         }
     }
 
-    fn active_remaining_cycles(&self) -> u32 {
+    fn execute_burst_beat(
+        &mut self,
+        device_index: usize,
+        request: &BurstRequest,
+        beat_index: usize,
+    ) -> Result<Option<u32>, BusError> {
+        let addr = request.beat_addr(beat_index);
+        match request {
+            BurstRequest::ReadWords { .. } => Ok(Some(u32::from_le_bytes(
+                self.load_bytes::<4>(device_index, addr)?,
+            ))),
+            BurstRequest::WriteWords { words, .. } => {
+                self.store_bytes(device_index, addr, words[beat_index].to_le_bytes())?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn transaction_remaining_cycles(&self) -> u32 {
         match self
             .active_transaction
             .as_ref()
@@ -232,6 +268,23 @@ impl MemoryMap {
             | Some(TransactionPhase::Failed(_)) => 1,
             None => 0,
         }
+    }
+
+    fn burst_remaining_cycles(&self) -> u32 {
+        match self.active_burst.as_ref().map(|burst| &burst.phase) {
+            Some(BurstPhase::InFlight {
+                remaining_cycles, ..
+            }) => *remaining_cycles,
+            Some(BurstPhase::Accepted { .. })
+            | Some(BurstPhase::Ready { .. })
+            | Some(BurstPhase::Failed(_)) => 1,
+            None => 0,
+        }
+    }
+
+    fn active_remaining_cycles(&self) -> u32 {
+        self.transaction_remaining_cycles()
+            .max(self.burst_remaining_cycles())
     }
 
     fn advance_active_transaction(&mut self) {
@@ -281,6 +334,90 @@ impl MemoryMap {
         }
     }
 
+    fn advance_active_burst(&mut self) {
+        let Some((device_index, request, beat_index, phase)) =
+            self.active_burst.as_ref().map(|active| {
+                (
+                    active.device_index,
+                    active.request.clone(),
+                    active.beat_index,
+                    active.phase.clone(),
+                )
+            })
+        else {
+            return;
+        };
+
+        let total_beats = request.beats();
+        let next_state = match phase {
+            BurstPhase::Accepted { .. } => {
+                let latency = self.devices[device_index].device.access_latency(
+                    request.beat_addr(beat_index),
+                    request.beat_kind(),
+                    4,
+                );
+                if latency == 0 {
+                    match self.execute_burst_beat(device_index, &request, beat_index) {
+                        Ok(read_word) => BeatAdvance::Completed(read_word),
+                        Err(error) => BeatAdvance::Failed(error),
+                    }
+                } else {
+                    BeatAdvance::Phase(BurstPhase::InFlight {
+                        beat_index,
+                        total_beats,
+                        remaining_cycles: latency,
+                    })
+                }
+            }
+            BurstPhase::InFlight {
+                remaining_cycles, ..
+            } => {
+                if remaining_cycles > 1 {
+                    BeatAdvance::Phase(BurstPhase::InFlight {
+                        beat_index,
+                        total_beats,
+                        remaining_cycles: remaining_cycles - 1,
+                    })
+                } else {
+                    match self.execute_burst_beat(device_index, &request, beat_index) {
+                        Ok(read_word) => BeatAdvance::Completed(read_word),
+                        Err(error) => BeatAdvance::Failed(error),
+                    }
+                }
+            }
+            ready_or_failed => BeatAdvance::Phase(ready_or_failed),
+        };
+
+        if let Some(active) = &mut self.active_burst {
+            match next_state {
+                BeatAdvance::Phase(phase) => {
+                    active.phase = phase;
+                }
+                BeatAdvance::Completed(read_word) => {
+                    if let Some(word) = read_word {
+                        active.read_words[beat_index] = word;
+                    }
+
+                    let next_beat_index = beat_index + 1;
+                    active.beat_index = next_beat_index;
+                    active.phase = if next_beat_index == total_beats {
+                        BurstPhase::Ready {
+                            completed_beats: total_beats,
+                        }
+                    } else {
+                        BurstPhase::Accepted {
+                            beat_index: next_beat_index,
+                            total_beats,
+                        }
+                    };
+                }
+                BeatAdvance::Failed(error) => {
+                    active.phase = BurstPhase::Failed(error);
+                }
+            }
+        }
+    }
+
     fn finish_active_request(&mut self) -> Result<TransactionResponse, BusError> {
         let phase = self
             .active_transaction
@@ -306,10 +443,50 @@ impl MemoryMap {
         }
     }
 
+    fn finish_active_burst(&mut self) -> Result<BurstResponse, BusError> {
+        let phase = self
+            .active_burst
+            .as_ref()
+            .map(|active| active.phase.clone())
+            .expect("finish_active_burst should only be called with an active burst");
+
+        match phase {
+            BurstPhase::Accepted { .. } => Err(BusError::Busy {
+                remaining_cycles: 1,
+            }),
+            BurstPhase::InFlight {
+                remaining_cycles, ..
+            } => Err(BusError::Busy { remaining_cycles }),
+            BurstPhase::Ready { completed_beats } => {
+                let active = self
+                    .active_burst
+                    .take()
+                    .expect("ready burst should still be present");
+                let response = match active.request {
+                    BurstRequest::ReadWords { .. } => BurstResponse::ReadWords(active.read_words),
+                    BurstRequest::WriteWords { .. } => BurstResponse::WriteComplete {
+                        beats: completed_beats,
+                    },
+                };
+                Ok(response)
+            }
+            BurstPhase::Failed(error) => {
+                self.active_burst = None;
+                Err(error)
+            }
+        }
+    }
+
     fn perform_request(
         &mut self,
         request: TransactionRequest,
     ) -> Result<TransactionResponse, BusError> {
+        if self.active_burst.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: self.active_remaining_cycles(),
+            });
+        }
+
         if let Some(active) = &self.active_transaction {
             if active.request != request {
                 return Err(BusError::Busy {
@@ -332,7 +509,7 @@ impl MemoryMap {
 
     /// Submit a single transaction to the memory map and leave it in the `Accepted` phase.
     pub fn submit_transaction(&mut self, request: TransactionRequest) -> Result<u64, BusError> {
-        if self.active_transaction.is_some() {
+        if self.active_transaction.is_some() || self.active_burst.is_some() {
             return Err(BusError::Busy {
                 remaining_cycles: self.active_remaining_cycles(),
             });
@@ -389,6 +566,90 @@ impl MemoryMap {
         }
 
         match self.finish_active_request() {
+            Ok(response) => Some(Ok(response)),
+            Err(BusError::Busy { .. }) => None,
+            Err(error) => Some(Err(error)),
+        }
+    }
+
+    /// Submit a contiguous 32-bit word burst to the memory map.
+    pub fn submit_burst(&mut self, request: BurstRequest) -> Result<u64, BusError> {
+        if self.active_transaction.is_some() || self.active_burst.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: self.active_remaining_cycles(),
+            });
+        }
+
+        let total_beats = request.beats();
+        assert!(
+            total_beats > 0,
+            "burst request must contain at least one beat"
+        );
+
+        let first_addr = request.base_addr();
+        let device_index = self
+            .find_device_index(first_addr)
+            .ok_or(BusError::UnmappedAddress { addr: first_addr })?;
+        for beat_index in 1..total_beats {
+            let addr = request.beat_addr(beat_index);
+            if self.find_device_index(addr) != Some(device_index) {
+                return Err(BusError::DeviceFault {
+                    addr,
+                    message: "burst crosses device boundary".to_string(),
+                });
+            }
+        }
+
+        let id = self.next_transaction_id;
+        self.next_transaction_id = self.next_transaction_id.wrapping_add(1);
+        self.active_burst = Some(ActiveBurst {
+            id,
+            device_index,
+            request,
+            beat_index: 0,
+            read_words: vec![0; total_beats].into_boxed_slice(),
+            phase: BurstPhase::Accepted {
+                beat_index: 0,
+                total_beats,
+            },
+        });
+        Ok(id)
+    }
+
+    /// Inspect the current phase of the outstanding burst, if the IDs match.
+    #[must_use]
+    pub fn burst_phase(&self, id: u64) -> Option<BurstPhase> {
+        self.active_burst
+            .as_ref()
+            .filter(|active| active.id == id)
+            .map(|active| active.phase.clone())
+    }
+
+    /// Advance the single outstanding burst by one beat-level protocol step.
+    pub fn advance_burst(&mut self, id: u64) -> Option<BurstPhase> {
+        if self
+            .active_burst
+            .as_ref()
+            .is_none_or(|active| active.id != id)
+        {
+            return None;
+        }
+
+        self.advance_active_burst();
+        self.burst_phase(id)
+    }
+
+    /// Consume a completed burst response, or a terminal error, if available.
+    pub fn take_burst_response(&mut self, id: u64) -> Option<Result<BurstResponse, BusError>> {
+        if self
+            .active_burst
+            .as_ref()
+            .is_none_or(|active| active.id != id)
+        {
+            return None;
+        }
+
+        match self.finish_active_burst() {
             Ok(response) => Some(Ok(response)),
             Err(BusError::Busy { .. }) => None,
             Err(error) => Some(Err(error)),
@@ -470,13 +731,14 @@ impl Bus for MemoryMap {
 
     fn tick(&mut self) {
         self.advance_active_transaction();
+        self.advance_active_burst();
         for slot in &mut self.devices {
             slot.device.tick();
         }
     }
 
     fn is_busy(&self) -> bool {
-        self.active_transaction.is_some()
+        self.active_transaction.is_some() || self.active_burst.is_some()
     }
 
     fn pending_interrupts(&self) -> InterruptSet {
@@ -498,6 +760,7 @@ impl fmt::Debug for MemoryMap {
             .collect();
         debug
             .field("active_transaction", &self.active_transaction)
+            .field("active_burst", &self.active_burst)
             .field("next_transaction_id", &self.next_transaction_id)
             .field("devices", &devices)
             .finish()
@@ -510,8 +773,9 @@ mod tests {
 
     use super::MemoryMap;
     use crate::{
-        AccessKind, AddressRange, Addressable, Bus, BusError, InterruptLine, InterruptSet,
-        TransactionPhase, TransactionRequest, TransactionResponse,
+        AccessKind, AddressRange, Addressable, BurstPhase, BurstRequest, BurstResponse, Bus,
+        BusError, InterruptLine, InterruptSet, TransactionPhase, TransactionRequest,
+        TransactionResponse,
     };
 
     #[derive(Debug)]
@@ -542,6 +806,45 @@ mod tests {
 
         fn pending_interrupts(&self) -> InterruptSet {
             self.interrupts
+        }
+
+        fn access_latency(&self, _addr: u64, _kind: AccessKind, _width: usize) -> u32 {
+            self.latency_cycles
+        }
+    }
+
+    #[derive(Debug)]
+    struct ByteArrayDevice {
+        range: AddressRange,
+        bytes: Vec<u8>,
+        latency_cycles: u32,
+    }
+
+    impl Addressable for ByteArrayDevice {
+        fn name(&self) -> &'static str {
+            "byte-array"
+        }
+
+        fn address_range(&self) -> AddressRange {
+            self.range
+        }
+
+        fn load8(&mut self, addr: u64) -> Result<u8, BusError> {
+            let offset = (addr - self.range.start) as usize;
+            self.bytes
+                .get(offset)
+                .copied()
+                .ok_or(BusError::UnmappedAddress { addr })
+        }
+
+        fn store8(&mut self, addr: u64, value: u8) -> Result<(), BusError> {
+            let offset = (addr - self.range.start) as usize;
+            let byte = self
+                .bytes
+                .get_mut(offset)
+                .ok_or(BusError::UnmappedAddress { addr })?;
+            *byte = value;
+            Ok(())
         }
 
         fn access_latency(&self, _addr: u64, _kind: AccessKind, _width: usize) -> u32 {
@@ -667,6 +970,68 @@ mod tests {
             }))
         );
         assert_eq!(map.transaction_phase(id), None);
+    }
+
+    #[test]
+    fn explicit_burst_progresses_beat_by_beat() {
+        let mut map = MemoryMap::new();
+        map.map_device(ByteArrayDevice {
+            range: AddressRange::new(0x1000, 8),
+            bytes: vec![0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55],
+            latency_cycles: 2,
+        })
+        .expect("device should map");
+
+        let id = map
+            .submit_burst(BurstRequest::read_words(0x1000, 2, AccessKind::Load))
+            .expect("burst should submit");
+        assert_eq!(
+            map.burst_phase(id),
+            Some(BurstPhase::Accepted {
+                beat_index: 0,
+                total_beats: 2,
+            })
+        );
+
+        assert_eq!(
+            map.advance_burst(id),
+            Some(BurstPhase::InFlight {
+                beat_index: 0,
+                total_beats: 2,
+                remaining_cycles: 2,
+            })
+        );
+
+        map.tick();
+        assert_eq!(
+            map.burst_phase(id),
+            Some(BurstPhase::InFlight {
+                beat_index: 0,
+                total_beats: 2,
+                remaining_cycles: 1,
+            })
+        );
+
+        map.tick();
+        assert_eq!(
+            map.burst_phase(id),
+            Some(BurstPhase::Accepted {
+                beat_index: 1,
+                total_beats: 2,
+            })
+        );
+
+        map.advance_burst(id);
+        map.tick();
+        map.tick();
+
+        assert_eq!(
+            map.take_burst_response(id),
+            Some(Ok(BurstResponse::ReadWords(
+                vec![0x1122_3344, 0x5566_7788].into_boxed_slice()
+            )))
+        );
+        assert_eq!(map.burst_phase(id), None);
     }
 
     #[test]

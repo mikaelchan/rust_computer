@@ -41,8 +41,11 @@ The current baseline already has:
 
 ## Bus And Devices
 
-- [ ] Upgrade the bus timing model from single transactions to beat/burst-aware transfers.
-  The memory map now exposes an explicit single-outstanding transaction lifecycle, but cache refills and write-backs still walk the lower bus one word at a time.
+- [x] Upgrade the bus timing model from single transactions to beat/burst-aware transfers.
+  The memory map now exposes explicit single-outstanding burst requests with beat-level `Accepted`/`InFlight`/`Ready` phases in addition to single-beat transactions.
+
+- [ ] Move cache line refill/write-back paths onto burst transfers.
+  The lower fabric can now represent bursts explicitly, but cache refills and write-backs still iterate word-by-word through the compatibility `Bus` interface.
 
 - [ ] Add multi-outstanding transaction support.
   This should follow the beat/burst work so DMA and future peripherals can overlap request issue with response completion more realistically.

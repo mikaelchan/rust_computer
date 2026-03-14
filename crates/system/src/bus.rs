@@ -212,6 +212,89 @@ pub enum TransactionPhase {
     Failed(BusError),
 }
 
+/// A beat-oriented burst request over contiguous 32-bit words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BurstRequest {
+    ReadWords {
+        base_addr: Address,
+        beats: usize,
+        kind: AccessKind,
+    },
+    WriteWords {
+        base_addr: Address,
+        words: Box<[u32]>,
+    },
+}
+
+impl BurstRequest {
+    #[must_use]
+    pub const fn read_words(base_addr: Address, beats: usize, kind: AccessKind) -> Self {
+        Self::ReadWords {
+            base_addr,
+            beats,
+            kind,
+        }
+    }
+
+    #[must_use]
+    pub fn write_words(base_addr: Address, words: Box<[u32]>) -> Self {
+        Self::WriteWords { base_addr, words }
+    }
+
+    #[must_use]
+    pub const fn beats(&self) -> usize {
+        match self {
+            Self::ReadWords { beats, .. } => *beats,
+            Self::WriteWords { words, .. } => words.len(),
+        }
+    }
+
+    #[must_use]
+    pub const fn base_addr(&self) -> Address {
+        match self {
+            Self::ReadWords { base_addr, .. } | Self::WriteWords { base_addr, .. } => *base_addr,
+        }
+    }
+
+    #[must_use]
+    pub const fn beat_addr(&self, beat_index: usize) -> Address {
+        self.base_addr() + (beat_index as u64 * 4)
+    }
+
+    #[must_use]
+    pub const fn beat_kind(&self) -> AccessKind {
+        match self {
+            Self::ReadWords { kind, .. } => *kind,
+            Self::WriteWords { .. } => AccessKind::Store,
+        }
+    }
+}
+
+/// Response payload produced by a completed burst request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BurstResponse {
+    ReadWords(Box<[u32]>),
+    WriteComplete { beats: usize },
+}
+
+/// Observable lifecycle state for a single outstanding burst.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BurstPhase {
+    Accepted {
+        beat_index: usize,
+        total_beats: usize,
+    },
+    InFlight {
+        beat_index: usize,
+        total_beats: usize,
+        remaining_cycles: u32,
+    },
+    Ready {
+        completed_beats: usize,
+    },
+    Failed(BusError),
+}
+
 /// A single bus transaction issued by a non-CPU bus master.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusMasterRequest {
