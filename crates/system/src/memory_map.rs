@@ -5,8 +5,8 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::bus::{
     AccessKind, Address, AddressRange, Addressable, BurstBus, BurstPhase, BurstRequest,
-    BurstResponse, Bus, BusError, InterruptSet, TransactionPhase, TransactionRequest,
-    TransactionResponse,
+    BurstResponse, Bus, BusError, InterruptSet, TransactionBus, TransactionPhase,
+    TransactionRequest, TransactionResponse,
 };
 
 struct DeviceSlot {
@@ -692,6 +692,27 @@ impl Bus for MemoryMap {
             .fold(InterruptSet::empty(), |interrupts, slot| {
                 interrupts.union(slot.device.pending_interrupts())
             })
+    }
+}
+
+impl TransactionBus for MemoryMap {
+    fn submit_transaction(&mut self, request: TransactionRequest) -> Result<u64, BusError> {
+        MemoryMap::submit_transaction(self, request)
+    }
+
+    fn transaction_phase(&self, id: u64) -> Option<TransactionPhase> {
+        MemoryMap::transaction_phase(self, id)
+    }
+
+    fn advance_transaction(&mut self, id: u64) -> Option<TransactionPhase> {
+        MemoryMap::advance_transaction(self, id)
+    }
+
+    fn take_transaction_response(
+        &mut self,
+        id: u64,
+    ) -> Option<Result<TransactionResponse, BusError>> {
+        MemoryMap::take_transaction_response(self, id)
     }
 }
 

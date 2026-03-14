@@ -48,7 +48,7 @@ The current baseline already has:
   Cache refill and dirty write-back paths now submit explicit lower-bus bursts, and unified L2 caches can serve burst refills from split L1s without falling back to per-word compatibility accesses.
 
 - [ ] Add multi-outstanding transaction support.
-  The memory map now accepts multiple explicit transactions and bursts concurrently, but DMA and other bus masters still need to move off the compatibility path to exploit that overlap end-to-end.
+  The memory map and arbiter now allow explicit lower-bus requests to stay in flight without consuming every later CPU cycle, but DMA still issues one word at a time and future masters still need richer request issue to exploit overlap more aggressively.
 
 - [x] Add bus arbitration for multiple bus masters.
   A new round-robin arbiter now sits in front of the memory map so autonomous devices can compete with the CPU for lower-bus cycles.

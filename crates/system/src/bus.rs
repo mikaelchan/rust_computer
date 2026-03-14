@@ -402,6 +402,17 @@ pub trait Bus {
     }
 }
 
+/// A transaction-capable bus that exposes an explicit transaction lifecycle.
+pub trait TransactionBus: Bus {
+    fn submit_transaction(&mut self, request: TransactionRequest) -> Result<u64, BusError>;
+    fn transaction_phase(&self, id: u64) -> Option<TransactionPhase>;
+    fn advance_transaction(&mut self, id: u64) -> Option<TransactionPhase>;
+    fn take_transaction_response(
+        &mut self,
+        id: u64,
+    ) -> Option<Result<TransactionResponse, BusError>>;
+}
+
 /// A burst-capable bus that exposes an explicit burst lifecycle.
 pub trait BurstBus: Bus {
     fn submit_burst(&mut self, request: BurstRequest) -> Result<u64, BusError>;
