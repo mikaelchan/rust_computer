@@ -1497,6 +1497,78 @@ mod tests {
     }
 
     #[test]
+    fn split_l1_can_refill_from_unified_l2() {
+        const RAM_BASE: u64 = 0x1000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(WordDevice::from_words(
+                0,
+                &[
+                    0x0050_0093,
+                    0x00a0_0113,
+                    0x0020_81b3,
+                    0x0000_006f,
+                    0x0010_0093,
+                    0x0020_0113,
+                    0x0031_81b3,
+                    0x0000_006f,
+                ],
+                1,
+            ))
+            .expect("rom should map");
+        memory
+            .map_device(WordDevice::from_words(
+                RAM_BASE,
+                &[9, 10, 11, 12, 13, 14, 15, 16],
+                1,
+            ))
+            .expect("ram should map");
+
+        let l2 = DirectMappedCache::new(
+            memory,
+            CacheConfig::new(
+                8,
+                vec![
+                    crate::AddressRange::new(0, 0x1000),
+                    crate::AddressRange::new(RAM_BASE, 0x1000),
+                ],
+            )
+            .with_line_size(16)
+            .with_associativity(2)
+            .with_write_policy(WritePolicy::WriteBack)
+            .with_store_allocation_policy(StoreAllocationPolicy::WriteAllocate),
+        );
+        let mut cache = SplitL1Cache::new(
+            l2,
+            CacheConfig::new(1, vec![crate::AddressRange::new(0, 0x1000)]).with_line_size(16),
+            CacheConfig::new(1, vec![crate::AddressRange::new(RAM_BASE, 0x1000)])
+                .with_line_size(16)
+                .with_write_policy(WritePolicy::WriteBack)
+                .with_store_allocation_policy(StoreAllocationPolicy::WriteAllocate),
+        );
+
+        assert_eq!(retry_fetch32(&mut cache, 0), 0x0050_0093);
+        assert_eq!(retry_fetch32(&mut cache, 16), 0x0010_0093);
+        assert_eq!(retry_fetch32(&mut cache, 0), 0x0050_0093);
+
+        assert_eq!(retry_load32(&mut cache, RAM_BASE), 9);
+        assert_eq!(retry_load32(&mut cache, RAM_BASE + 16), 13);
+        assert_eq!(retry_load32(&mut cache, RAM_BASE), 9);
+
+        let l1_stats = cache.stats();
+        assert_eq!(l1_stats.instruction.read_misses, 3);
+        assert_eq!(l1_stats.instruction.refills, 3);
+        assert_eq!(l1_stats.data.read_misses, 3);
+        assert_eq!(l1_stats.data.refills, 3);
+
+        let l2_stats = cache.inner().stats();
+        assert_eq!(l2_stats.read_misses, 4);
+        assert_eq!(l2_stats.refills, 4);
+        assert!(l2_stats.read_hits >= 20);
+    }
+
+    #[test]
     #[should_panic(expected = "cacheable range start")]
     fn rejects_cacheable_range_with_unaligned_start_for_line_size() {
         let memory = MemoryMap::new();

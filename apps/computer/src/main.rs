@@ -2,8 +2,8 @@ use rvsim_cpu::{CpuModel, ReferenceCore};
 use rvsim_devices::{InterruptController, MachineSoftwareInterrupt, Ram, Rom, SimpleUart};
 use rvsim_isa::CsrAddress;
 use rvsim_system::{
-    AddressRange, Bus, CacheConfig, Machine, MemoryMap, ReplacementPolicy, SplitL1Cache,
-    StoreAllocationPolicy, WritePolicy,
+    AddressRange, Bus, CacheConfig, DirectMappedCache, Machine, MemoryMap, ReplacementPolicy,
+    SplitL1Cache, StoreAllocationPolicy, WritePolicy,
 };
 
 const RESET_VECTOR: u32 = 0x0000_0000;
@@ -26,6 +26,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0x3020_0073, // mret
         0,
         0,
+        0,
+        0,
+        0,
+        0,
     ];
 
     let mut memory = MemoryMap::new();
@@ -35,8 +39,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     memory.map_device(InterruptController::new(INTERRUPT_CONTROLLER_BASE))?;
     memory.map_device(MachineSoftwareInterrupt::new(MSIP_BASE))?;
 
-    let cache = SplitL1Cache::new(
+    let l2 = DirectMappedCache::new(
         memory,
+        CacheConfig::new(
+            128,
+            vec![
+                AddressRange::new(RESET_VECTOR as u64, 0x1000),
+                AddressRange::new(RAM_BASE, 0x1000),
+            ],
+        )
+        .with_line_size(32)
+        .with_associativity(4)
+        .with_replacement_policy(ReplacementPolicy::LeastRecentlyUsed)
+        .with_write_policy(WritePolicy::WriteBack)
+        .with_store_allocation_policy(StoreAllocationPolicy::WriteAllocate),
+    );
+
+    let cache = SplitL1Cache::new(
+        l2,
         CacheConfig::new(64, vec![AddressRange::new(RESET_VECTOR as u64, 0x1000)])
             .with_line_size(16)
             .with_associativity(2)
@@ -138,9 +158,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         machine.bus().stats().data.write_backs,
         machine.bus().stats().data.invalidations
     );
+    println!(
+        "l2 stats: hits={} misses={} refills={} evictions={} write_backs={} invalidations={}",
+        machine.bus().inner().stats().read_hits,
+        machine.bus().inner().stats().read_misses,
+        machine.bus().inner().stats().refills,
+        machine.bus().inner().stats().evictions,
+        machine.bus().inner().stats().write_backs,
+        machine.bus().inner().stats().invalidations
+    );
 
     println!(
-        "computer ready: ReferenceCore now demonstrates split L1 instruction/data caches plus external and software interrupts"
+        "computer ready: ReferenceCore now demonstrates split L1 caches over a unified L2 plus external and software interrupts"
     );
 
     Ok(())

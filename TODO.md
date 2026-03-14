@@ -27,8 +27,8 @@ The current baseline already has:
 
 ## Memory Hierarchy
 
-- [ ] Add an L2 cache wrapper below the L1 cache.
-  Keep it configurable and reusable so unified-L2 and split-L2 experiments are both possible.
+- [x] Add an L2 cache wrapper below the L1 cache.
+  The cache wrappers are now used in a stacked hierarchy, with split L1 instruction/data caches over a unified L2 in the example machine and regression tests.
 
 - [ ] Add a memory-controller / DRAM timing model.
   Start with a simple burst-based model, then optionally add bank/row behavior for more realistic miss latency studies.
