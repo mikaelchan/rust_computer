@@ -1,0 +1,18 @@
+# Machine software interrupt smoke test.
+# Main body programs mtvec/mstatus/mie, then spins at 0x14.
+# Trap handler starts at 0x20 and increments x10 before mret.
+# Trailing nops give the pipeline front-end safe speculative fetch space.
+0x02000093
+0x30509073
+0x00800093
+0x30009073
+0x30409073
+0x0000006f
+0x00000000
+0x00000000
+0x00150513
+0x30200073
+0x00000013
+0x00000013
+0x00000013
+0x00000013

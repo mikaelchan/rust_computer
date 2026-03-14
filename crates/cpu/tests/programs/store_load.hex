@@ -1,0 +1,7 @@
+# Store/load smoke test.
+# Expect x3 = 9 and RAM[0x1000_0000] = 9.
+0x100000b7
+0x00900113
+0x0020a023
+0x0000a183
+0x0000006f

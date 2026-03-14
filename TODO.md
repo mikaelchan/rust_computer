@@ -69,8 +69,8 @@ The current baseline already has:
 - [ ] Add focused microbenchmarks for cache and memory behavior.
   Examples: conflict misses, line refill cost, write-back pressure, interrupt latency under memory pressure.
 
-- [ ] Add a small architecture test program suite.
-  Keep boot images/programs versioned in-tree so regression scenarios are easy to rerun.
+- [x] Add a small architecture test program suite.
+  Versioned RV32 program images now live under `crates/cpu/tests/programs`, and integration tests run them against both the reference and pipeline cores.
 
 - [ ] Add more user-facing documentation for memory experiments.
   Document recommended machine configurations, cache policies, and expected timing behavior for common research scenarios.

@@ -1,0 +1,8 @@
+# Counted loop smoke test.
+# Expect x2 = 3 after the loop drains.
+0x00300093
+0x00000113
+0x00110113
+0xfff08093
+0xfe009ce3
+0x0000006f
