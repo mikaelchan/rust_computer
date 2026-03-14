@@ -44,7 +44,7 @@ impl CacheConfig {
     #[must_use]
     pub fn new(line_count: usize, cached_ranges: Vec<AddressRange>) -> Self {
         assert!(line_count > 0, "cache requires at least one line");
-        Self {
+        let config = Self {
             line_count,
             line_size: WORD_BYTES,
             associativity: 1,
@@ -52,7 +52,9 @@ impl CacheConfig {
             write_policy: WritePolicy::WriteThrough,
             store_allocation_policy: StoreAllocationPolicy::NoWriteAllocate,
             cached_ranges,
-        }
+        };
+        config.validate_cached_ranges();
+        config
     }
 
     #[must_use]
@@ -62,6 +64,7 @@ impl CacheConfig {
             "cache line size must be a power-of-two multiple of four bytes"
         );
         self.line_size = line_size;
+        self.validate_cached_ranges();
         self
     }
 
@@ -143,6 +146,24 @@ impl CacheConfig {
     #[must_use]
     pub fn caches_address(&self, addr: Address) -> bool {
         self.cached_ranges.iter().any(|range| range.contains(addr))
+    }
+
+    fn validate_cached_ranges(&self) {
+        let line_size = self.line_size as u64;
+        for range in &self.cached_ranges {
+            assert!(
+                range.start % line_size == 0,
+                "cacheable range start 0x{:08x} must align to cache line size {}",
+                range.start,
+                self.line_size
+            );
+            assert!(
+                range.size % line_size == 0,
+                "cacheable range size 0x{:08x} must be a whole number of cache lines of size {}",
+                range.size,
+                self.line_size
+            );
+        }
     }
 }
 
@@ -1473,5 +1494,22 @@ mod tests {
         assert_eq!(stats.instruction.read_misses, 2);
         assert_eq!(stats.instruction.invalidations, 1);
         assert!(stats.data.write_accesses >= 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "cacheable range start")]
+    fn rejects_cacheable_range_with_unaligned_start_for_line_size() {
+        let memory = MemoryMap::new();
+        let config =
+            CacheConfig::new(8, vec![crate::AddressRange::new(8, 0x1000)]).with_line_size(16);
+        let _cache = DirectMappedCache::new(memory, config);
+    }
+
+    #[test]
+    #[should_panic(expected = "cacheable range size")]
+    fn rejects_cacheable_range_with_partial_line_size() {
+        let memory = MemoryMap::new();
+        let config = CacheConfig::new(8, vec![crate::AddressRange::new(0, 24)]).with_line_size(16);
+        let _cache = DirectMappedCache::new(memory, config);
     }
 }

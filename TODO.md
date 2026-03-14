@@ -19,11 +19,11 @@ The current baseline already has:
 - [x] Add configurable store allocation policy.
   `CacheConfig` now supports both `write-allocate` and `no-write-allocate`.
 
-- [ ] Tighten cacheable-range boundary behavior.
-  Today a line is cacheable only when the whole line fits inside a cached physical range. This should become an explicit policy with validation and tests, so short ROM images or partial ranges do not fail unexpectedly.
+- [x] Tighten cacheable-range boundary behavior.
+  Cacheable physical ranges are now validated against cache line boundaries so partial-line ranges fail fast during cache construction.
 
-- [ ] Add CPU-level integration tests for cache behavior.
-  Cover pipeline/reference cores with split L1, interrupt delivery, wait states, and cache refill interactions so later memory-system work does not silently break front-end or memory timing.
+- [x] Add CPU-level integration tests for cache behavior.
+  Reference and pipeline cores now have split-L1 integration coverage so front-end fetches and data accesses stay visible as separate paths.
 
 ## Memory Hierarchy
 

@@ -495,7 +495,10 @@ mod tests {
     use rvsim_devices::{
         InterruptController, LatencyAdapter, MachineSoftwareInterrupt, MachineTimer, Ram, Rom,
     };
-    use rvsim_system::{Bus, BusError, Machine, MemoryMap, Processor};
+    use rvsim_system::{
+        AddressRange, Bus, BusError, CacheConfig, Machine, MemoryMap, Processor, SplitL1Cache,
+        StoreAllocationPolicy, WritePolicy,
+    };
 
     use super::PipelineCore;
     use crate::{FlushReason, core::CpuModel};
@@ -1033,6 +1036,56 @@ mod tests {
 
         assert!(observed_memory_wait);
         assert_eq!(machine.cpu().hart_state().registers.read(3), 9);
+    }
+
+    #[test]
+    fn split_l1_cache_feeds_pipeline_front_end_and_data_path_separately() {
+        const RAM_BASE: u64 = 0x1000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Rom::from_words(
+                0,
+                &[
+                    encode_lui(1, 0x10000),
+                    encode_addi(2, 0, 9),
+                    encode_sw(2, 1, 0),
+                    encode_lw(3, 1, 0),
+                    encode_lw(4, 1, 0),
+                    encode_jal(0, 0),
+                    0,
+                    0,
+                ],
+            ))
+            .expect("rom should map");
+        memory
+            .map_device(Ram::new(RAM_BASE, 0x1000))
+            .expect("ram should map");
+
+        let cache = SplitL1Cache::new(
+            memory,
+            CacheConfig::new(8, vec![AddressRange::new(0, 0x1000)]).with_line_size(16),
+            CacheConfig::new(8, vec![AddressRange::new(RAM_BASE, 0x1000)])
+                .with_line_size(16)
+                .with_write_policy(WritePolicy::WriteBack)
+                .with_store_allocation_policy(StoreAllocationPolicy::WriteAllocate),
+        );
+
+        let mut machine = Machine::new(PipelineCore::new(0), cache);
+        for _ in 0..12 {
+            machine
+                .step_cycle()
+                .expect("pipeline cycle should work through split cache");
+        }
+
+        assert_eq!(machine.cpu().hart_state().registers.read(3), 9);
+        assert_eq!(machine.cpu().hart_state().registers.read(4), 9);
+
+        let stats = machine.bus().stats();
+        assert!(stats.instruction.refills >= 2);
+        assert!(stats.instruction.read_hits >= 4);
+        assert_eq!(stats.data.refills, 1);
+        assert!(stats.data.read_hits >= 1);
     }
 
     fn encode_add(rd: u8, rs1: u8, rs2: u8) -> u32 {

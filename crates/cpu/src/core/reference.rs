@@ -152,8 +152,10 @@ mod tests {
     use rvsim_devices::{
         InterruptController, LatencyAdapter, MachineSoftwareInterrupt, MachineTimer, Ram, Rom,
     };
-    use rvsim_system::{AddressRange, Bus, InterruptLine, InterruptSet, Processor};
-    use rvsim_system::{Machine, MemoryMap};
+    use rvsim_system::{
+        AddressRange, Bus, CacheConfig, InterruptLine, InterruptSet, Machine, MemoryMap, Processor,
+        SplitL1Cache, StoreAllocationPolicy, WritePolicy,
+    };
 
     use super::ReferenceCore;
     use crate::core::CpuModel;
@@ -609,6 +611,57 @@ mod tests {
 
         assert!(stalled_cycles >= 4);
         assert_eq!(machine.cpu().hart_state().registers.read(3), 9);
+    }
+
+    #[test]
+    fn split_l1_cache_separates_instruction_and_data_paths() {
+        const RAM_BASE: u64 = 0x1000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Rom::from_words(
+                0,
+                &[
+                    encode_lui(1, 0x10000),
+                    encode_addi(2, 0, 9),
+                    encode_sw(2, 1, 0),
+                    encode_lw(3, 1, 0),
+                    encode_lw(4, 1, 0),
+                    encode_jal(0, 0),
+                    0,
+                    0,
+                ],
+            ))
+            .expect("rom should map");
+        memory
+            .map_device(Ram::new(RAM_BASE, 0x1000))
+            .expect("ram should map");
+
+        let cache = SplitL1Cache::new(
+            memory,
+            CacheConfig::new(8, vec![AddressRange::new(0, 0x1000)]).with_line_size(16),
+            CacheConfig::new(8, vec![AddressRange::new(RAM_BASE, 0x1000)])
+                .with_line_size(16)
+                .with_write_policy(WritePolicy::WriteBack)
+                .with_store_allocation_policy(StoreAllocationPolicy::WriteAllocate),
+        );
+
+        let mut machine = Machine::new(ReferenceCore::new(0), cache);
+        for _ in 0..6 {
+            machine
+                .step_cycle()
+                .expect("reference cycle should work through split cache");
+        }
+
+        assert_eq!(machine.cpu().hart_state().registers.read(3), 9);
+        assert_eq!(machine.cpu().hart_state().registers.read(4), 9);
+
+        let stats = machine.bus().stats();
+        assert_eq!(stats.instruction.read_misses, 2);
+        assert_eq!(stats.instruction.refills, 2);
+        assert!(stats.instruction.read_hits >= 6);
+        assert_eq!(stats.data.refills, 1);
+        assert!(stats.data.read_hits >= 2);
     }
 
     fn encode_csrrwi(rd: u8, csr: u16, zimm: u8) -> u32 {
