@@ -41,6 +41,12 @@ The current baseline already has:
 
 ## Bus And Devices
 
+- [ ] Upgrade the bus timing model from single transactions to beat/burst-aware transfers.
+  The memory map now exposes an explicit single-outstanding transaction lifecycle, but cache refills and write-backs still walk the lower bus one word at a time.
+
+- [ ] Add multi-outstanding transaction support.
+  This should follow the beat/burst work so DMA and future peripherals can overlap request issue with response completion more realistically.
+
 - [x] Add bus arbitration for multiple bus masters.
   A new round-robin arbiter now sits in front of the memory map so autonomous devices can compete with the CPU for lower-bus cycles.
 

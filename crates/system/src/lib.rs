@@ -11,7 +11,8 @@ pub mod memory_map;
 pub use arbiter::{ArbiterBus, ArbiterStats};
 pub use bus::{
     AccessKind, Address, AddressRange, Addressable, Bus, BusError, BusMaster, BusMasterRequest,
-    BusMasterResponse, InterruptLine, InterruptSet,
+    BusMasterResponse, InterruptLine, InterruptSet, TransactionPhase, TransactionRequest,
+    TransactionResponse,
 };
 pub use cache::{
     CacheConfig, CacheStats, DirectMappedCache, ReplacementPolicy, SplitCacheStats, SplitL1Cache,

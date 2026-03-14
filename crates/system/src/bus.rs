@@ -145,6 +145,73 @@ impl fmt::Display for BusError {
 
 impl std::error::Error for BusError {}
 
+/// A transaction request accepted by the timing-aware bus fabric.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactionRequest {
+    pub addr: Address,
+    pub kind: AccessKind,
+    pub width: usize,
+    pub write_data: [u8; 4],
+}
+
+impl TransactionRequest {
+    #[must_use]
+    pub const fn fetch32(addr: Address) -> Self {
+        Self {
+            addr,
+            kind: AccessKind::Fetch,
+            width: 4,
+            write_data: [0; 4],
+        }
+    }
+
+    #[must_use]
+    pub const fn load(addr: Address, width: usize) -> Self {
+        Self {
+            addr,
+            kind: AccessKind::Load,
+            width,
+            write_data: [0; 4],
+        }
+    }
+
+    #[must_use]
+    pub const fn store(addr: Address, width: usize, write_data: [u8; 4]) -> Self {
+        Self {
+            addr,
+            kind: AccessKind::Store,
+            width,
+            write_data,
+        }
+    }
+}
+
+/// Response payload produced by a completed transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionResponse {
+    Read { data: [u8; 4], width: usize },
+    WriteComplete,
+}
+
+impl TransactionResponse {
+    #[must_use]
+    pub const fn read_u32(self) -> Option<u32> {
+        match self {
+            Self::Read { data, width: 4 } => Some(u32::from_le_bytes(data)),
+            _ => None,
+        }
+    }
+}
+
+/// Observable lifecycle state for a single outstanding bus transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionPhase {
+    Accepted,
+    InFlight { remaining_cycles: u32 },
+    Ready(TransactionResponse),
+    Failed(BusError),
+}
+
 /// A single bus transaction issued by a non-CPU bus master.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusMasterRequest {
