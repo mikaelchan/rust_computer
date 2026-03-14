@@ -5,8 +5,8 @@ use rvsim_system::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DmaPhase {
-    Read,
-    Write { word: u32 },
+    ReadBurst { beats: usize },
+    WriteBurst { words: Box<[u32]> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +32,8 @@ pub struct DmaController {
 }
 
 impl DmaController {
+    const MAX_BURST_WORDS: usize = 8;
+
     pub const SOURCE_OFFSET: Address = 0;
     pub const DESTINATION_OFFSET: Address = 4;
     pub const LENGTH_OFFSET: Address = 8;
@@ -136,8 +138,14 @@ impl DmaController {
             source: u64::from(self.source),
             destination: u64::from(self.destination),
             remaining_words: self.length_words,
-            phase: DmaPhase::Read,
+            phase: DmaPhase::ReadBurst {
+                beats: Self::burst_words(self.length_words),
+            },
         });
+    }
+
+    fn burst_words(remaining_words: u32) -> usize {
+        remaining_words.min(Self::MAX_BURST_WORDS as u32) as usize
     }
 
     fn apply_control_byte(&mut self, value: u8) {
@@ -220,12 +228,13 @@ impl BusMaster for DmaController {
     fn request(&mut self) -> Option<BusMasterRequest> {
         let active = self.active.as_ref()?;
         Some(match active.phase {
-            DmaPhase::Read => BusMasterRequest::Load32 {
-                addr: active.source,
+            DmaPhase::ReadBurst { beats } => BusMasterRequest::ReadWords {
+                base_addr: active.source,
+                beats,
             },
-            DmaPhase::Write { word } => BusMasterRequest::Store32 {
-                addr: active.destination,
-                value: word,
+            DmaPhase::WriteBurst { ref words } => BusMasterRequest::WriteWords {
+                base_addr: active.destination,
+                words: words.clone(),
             },
         })
     }
@@ -236,22 +245,28 @@ impl BusMaster for DmaController {
         };
 
         match response {
-            Ok(BusMasterResponse::Load32(word)) => {
-                active.phase = DmaPhase::Write { word };
+            Ok(BusMasterResponse::ReadWords(words)) => {
+                active.phase = DmaPhase::WriteBurst { words };
                 self.active = Some(active);
             }
-            Ok(BusMasterResponse::StoreComplete) => {
-                active.source += 4;
-                active.destination += 4;
-                active.remaining_words -= 1;
-                self.transferred_words += 1;
+            Ok(BusMasterResponse::WriteWordsComplete { beats }) => {
+                let beats = beats as u32;
+                active.source += u64::from(beats) * 4;
+                active.destination += u64::from(beats) * 4;
+                active.remaining_words -= beats;
+                self.transferred_words += beats;
 
                 if active.remaining_words == 0 {
                     self.done = true;
                 } else {
-                    active.phase = DmaPhase::Read;
+                    active.phase = DmaPhase::ReadBurst {
+                        beats: Self::burst_words(active.remaining_words),
+                    };
                     self.active = Some(active);
                 }
+            }
+            Ok(BusMasterResponse::Load32(_)) | Ok(BusMasterResponse::StoreComplete) => {
+                self.error = true;
             }
             Err(_) => {
                 self.error = true;
@@ -306,7 +321,7 @@ mod tests {
         )
         .expect("DMA control should start transfer");
 
-        for _ in 0..8 {
+        for _ in 0..16 {
             bus.tick();
             if dma.borrow().is_done() {
                 break;
@@ -324,7 +339,7 @@ mod tests {
                 .expect("copied word 1 should read"),
             0x5566_7788
         );
-        assert!(dma.borrow().is_done());
+        assert!(dma.borrow().is_done(), "{:?}", dma.borrow());
         assert!(!dma.borrow().has_error());
         assert_eq!(
             bus.pending_interrupts().highest_priority(),
@@ -381,5 +396,60 @@ mod tests {
                 & DmaController::STATUS_ERROR,
             DmaController::STATUS_ERROR
         );
+    }
+
+    #[test]
+    fn issues_burst_requests_for_multiword_transfers() {
+        let dma = Rc::new(RefCell::new(DmaController::new(DMA_BASE)));
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Ram::new(RAM_BASE, 0x200))
+            .expect("RAM should map");
+        memory
+            .map_shared_device(Rc::clone(&dma))
+            .expect("DMA should map");
+
+        let mut bus = ArbiterBus::new(memory);
+        bus.add_shared_master(Rc::clone(&dma));
+
+        for (index, word) in [0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444]
+            .into_iter()
+            .enumerate()
+        {
+            bus.store32(RAM_BASE + (index as u64 * 4), word)
+                .expect("source word should write");
+        }
+
+        bus.store32(DMA_BASE + DmaController::SOURCE_OFFSET, RAM_BASE as u32)
+            .expect("DMA source should program");
+        bus.store32(
+            DMA_BASE + DmaController::DESTINATION_OFFSET,
+            (RAM_BASE + 0x80) as u32,
+        )
+        .expect("DMA destination should program");
+        bus.store32(DMA_BASE + DmaController::LENGTH_OFFSET, 4)
+            .expect("DMA length should program");
+        bus.store32(
+            DMA_BASE + DmaController::CONTROL_OFFSET,
+            DmaController::CONTROL_START,
+        )
+        .expect("DMA control should start transfer");
+
+        for _ in 0..16 {
+            bus.tick();
+            if dma.borrow().is_done() {
+                break;
+            }
+        }
+
+        assert!(dma.borrow().is_done(), "{:?}", dma.borrow());
+        assert_eq!(bus.stats().master_grants, 2);
+        for index in 0..4 {
+            assert_eq!(
+                bus.load32(RAM_BASE + 0x80 + (index as u64 * 4))
+                    .expect("copied word should read"),
+                [0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444][index]
+            );
+        }
     }
 }

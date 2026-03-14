@@ -295,18 +295,33 @@ pub enum BurstPhase {
     Failed(BusError),
 }
 
-/// A single bus transaction issued by a non-CPU bus master.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A bus request issued by a non-CPU bus master.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BusMasterRequest {
-    Load32 { addr: Address },
-    Store32 { addr: Address, value: u32 },
+    Load32 {
+        addr: Address,
+    },
+    Store32 {
+        addr: Address,
+        value: u32,
+    },
+    ReadWords {
+        base_addr: Address,
+        beats: usize,
+    },
+    WriteWords {
+        base_addr: Address,
+        words: Box<[u32]>,
+    },
 }
 
 /// Completion value returned to a non-CPU bus master.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BusMasterResponse {
     Load32(u32),
     StoreComplete,
+    ReadWords(Box<[u32]>),
+    WriteWordsComplete { beats: usize },
 }
 
 /// A peripheral-side initiator that can compete with the CPU for bus access.

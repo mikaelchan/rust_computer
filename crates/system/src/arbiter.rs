@@ -28,7 +28,13 @@ struct PendingRequest {
 struct InFlightRequest {
     master_index: usize,
     request: BusMasterRequest,
-    transaction_id: u64,
+    request_id: RequestId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestId {
+    Transaction(u64),
+    Burst(u64),
 }
 
 struct SharedBusMaster<M> {
@@ -65,7 +71,7 @@ pub struct ArbiterBus<B> {
 
 impl<B> ArbiterBus<B>
 where
-    B: TransactionBus,
+    B: TransactionBus + BurstBus,
 {
     #[must_use]
     pub fn new(inner: B) -> Self {
@@ -122,12 +128,36 @@ where
             BusMasterRequest::Store32 { addr, value } => {
                 TransactionRequest::store(addr, 4, value.to_le_bytes())
             }
+            BusMasterRequest::ReadWords { .. } | BusMasterRequest::WriteWords { .. } => {
+                unreachable!("burst master request cannot be lowered to a transaction")
+            }
+        }
+    }
+
+    fn request_to_burst(request: &BusMasterRequest) -> BurstRequest {
+        match request {
+            BusMasterRequest::ReadWords { base_addr, beats } => {
+                BurstRequest::read_words(*base_addr, *beats, crate::AccessKind::Load)
+            }
+            BusMasterRequest::WriteWords { base_addr, words } => {
+                BurstRequest::write_words(*base_addr, words.clone())
+            }
+            BusMasterRequest::Load32 { .. } | BusMasterRequest::Store32 { .. } => {
+                unreachable!("single-beat master request cannot be lowered to a burst")
+            }
         }
     }
 
     fn request_addr(request: &BusMasterRequest) -> crate::Address {
-        match *request {
-            BusMasterRequest::Load32 { addr } | BusMasterRequest::Store32 { addr, .. } => addr,
+        match request {
+            BusMasterRequest::Load32 { addr }
+            | BusMasterRequest::Store32 { addr, .. }
+            | BusMasterRequest::ReadWords {
+                base_addr: addr, ..
+            }
+            | BusMasterRequest::WriteWords {
+                base_addr: addr, ..
+            } => *addr,
         }
     }
 
@@ -149,6 +179,24 @@ where
         }
     }
 
+    fn response_from_burst(
+        request: &BusMasterRequest,
+        response: BurstResponse,
+    ) -> Result<BusMasterResponse, BusError> {
+        match (request, response) {
+            (BusMasterRequest::ReadWords { .. }, BurstResponse::ReadWords(words)) => {
+                Ok(BusMasterResponse::ReadWords(words))
+            }
+            (BusMasterRequest::WriteWords { .. }, BurstResponse::WriteComplete { beats }) => {
+                Ok(BusMasterResponse::WriteWordsComplete { beats })
+            }
+            _ => Err(BusError::DeviceFault {
+                addr: Self::request_addr(request),
+                message: "arbiter observed mismatched master burst response".to_string(),
+            }),
+        }
+    }
+
     fn master_has_outstanding_request(&self, master_index: usize) -> bool {
         self.pending_request
             .as_ref()
@@ -164,16 +212,24 @@ where
             return;
         };
 
-        match self
-            .inner
-            .submit_transaction(Self::request_to_transaction(&pending.request))
-        {
-            Ok(transaction_id) => {
+        let submit_result = match pending.request {
+            BusMasterRequest::Load32 { .. } | BusMasterRequest::Store32 { .. } => self
+                .inner
+                .submit_transaction(Self::request_to_transaction(&pending.request))
+                .map(RequestId::Transaction),
+            BusMasterRequest::ReadWords { .. } | BusMasterRequest::WriteWords { .. } => self
+                .inner
+                .submit_burst(Self::request_to_burst(&pending.request))
+                .map(RequestId::Burst),
+        };
+
+        match submit_result {
+            Ok(request_id) => {
                 self.stats.master_grants += 1;
                 self.in_flight_requests.push(InFlightRequest {
                     master_index: pending.master_index,
                     request: pending.request,
-                    transaction_id,
+                    request_id,
                 });
                 self.pending_request = None;
             }
@@ -191,17 +247,25 @@ where
         let mut index = 0;
         while index < self.in_flight_requests.len() {
             let active = &self.in_flight_requests[index];
-            let Some(result) = self.inner.take_transaction_response(active.transaction_id) else {
+            let result = match active.request_id {
+                RequestId::Transaction(id) => {
+                    self.inner.take_transaction_response(id).map(|result| {
+                        result.and_then(|response| {
+                            Self::response_from_transaction(&active.request, response)
+                        })
+                    })
+                }
+                RequestId::Burst(id) => self.inner.take_burst_response(id).map(|result| {
+                    result.and_then(|response| Self::response_from_burst(&active.request, response))
+                }),
+            };
+            let Some(result) = result else {
                 index += 1;
                 continue;
             };
 
             let active = self.in_flight_requests.swap_remove(index);
-            let response = result
-                .and_then(|response| Self::response_from_transaction(&active.request, response));
-            self.masters[active.master_index]
-                .master
-                .on_response(response);
+            self.masters[active.master_index].master.on_response(result);
         }
     }
 
@@ -241,7 +305,7 @@ where
 
 impl<B> Bus for ArbiterBus<B>
 where
-    B: TransactionBus,
+    B: TransactionBus + BurstBus,
 {
     fn reset(&mut self) {
         self.next_master_index = 0;
@@ -362,8 +426,9 @@ mod tests {
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
     use crate::{
-        Bus, BusMaster, BusMasterRequest, BusMasterResponse, TransactionBus, TransactionPhase,
-        TransactionRequest, TransactionResponse,
+        BurstBus, BurstPhase, BurstRequest, BurstResponse, Bus, BusMaster, BusMasterRequest,
+        BusMasterResponse, TransactionBus, TransactionPhase, TransactionRequest,
+        TransactionResponse,
     };
 
     use super::ArbiterBus;
@@ -375,11 +440,21 @@ mod tests {
         phase: TransactionPhase,
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ActiveBurst {
+        id: u64,
+        request: BurstRequest,
+        beat_index: usize,
+        phase: BurstPhase,
+        read_words: Box<[u32]>,
+    }
+
     #[derive(Debug)]
     struct TinyBus {
         data: [u8; 32],
         transaction_latency: u32,
         active_transaction: Option<ActiveTransaction>,
+        active_burst: Option<ActiveBurst>,
         next_transaction_id: u64,
     }
 
@@ -389,6 +464,7 @@ mod tests {
                 data: [0; 32],
                 transaction_latency: 0,
                 active_transaction: None,
+                active_burst: None,
                 next_transaction_id: 0,
             }
         }
@@ -442,6 +518,26 @@ mod tests {
                 }),
             }
         }
+
+        fn execute_burst_beat(
+            &mut self,
+            request: &BurstRequest,
+            beat_index: usize,
+        ) -> Result<Option<u32>, crate::BusError> {
+            let addr = request.beat_addr(beat_index) as usize;
+            match request {
+                BurstRequest::ReadWords { .. } => Ok(Some(u32::from_le_bytes([
+                    self.data[addr],
+                    self.data[addr + 1],
+                    self.data[addr + 2],
+                    self.data[addr + 3],
+                ]))),
+                BurstRequest::WriteWords { words, .. } => {
+                    self.data[addr..addr + 4].copy_from_slice(&words[beat_index].to_le_bytes());
+                    Ok(None)
+                }
+            }
+        }
     }
 
     impl Bus for TinyBus {
@@ -457,6 +553,7 @@ mod tests {
         fn reset(&mut self) {
             self.data = [0; 32];
             self.active_transaction = None;
+            self.active_burst = None;
             self.next_transaction_id = 0;
         }
 
@@ -500,10 +597,97 @@ mod tests {
             if let Some(active) = self.active_transaction.as_mut() {
                 active.phase = next_phase;
             }
+
+            let Some((request, beat_index, phase)) = self.active_burst.as_ref().map(|active| {
+                (
+                    active.request.clone(),
+                    active.beat_index,
+                    active.phase.clone(),
+                )
+            }) else {
+                return;
+            };
+
+            let total_beats = request.beats();
+            let next_phase = match phase {
+                BurstPhase::Accepted { .. } => {
+                    if self.transaction_latency == 0 {
+                        match self.execute_burst_beat(&request, beat_index) {
+                            Ok(read_word) => {
+                                if let Some(word) = read_word {
+                                    if let Some(active) = self.active_burst.as_mut() {
+                                        active.read_words[beat_index] = word;
+                                    }
+                                }
+                                if beat_index + 1 == total_beats {
+                                    BurstPhase::Ready {
+                                        completed_beats: total_beats,
+                                    }
+                                } else {
+                                    if let Some(active) = self.active_burst.as_mut() {
+                                        active.beat_index += 1;
+                                    }
+                                    BurstPhase::Accepted {
+                                        beat_index: beat_index + 1,
+                                        total_beats,
+                                    }
+                                }
+                            }
+                            Err(error) => BurstPhase::Failed(error),
+                        }
+                    } else {
+                        BurstPhase::InFlight {
+                            beat_index,
+                            total_beats,
+                            remaining_cycles: self.transaction_latency,
+                        }
+                    }
+                }
+                BurstPhase::InFlight {
+                    remaining_cycles, ..
+                } => {
+                    if remaining_cycles > 1 {
+                        BurstPhase::InFlight {
+                            beat_index,
+                            total_beats,
+                            remaining_cycles: remaining_cycles - 1,
+                        }
+                    } else {
+                        match self.execute_burst_beat(&request, beat_index) {
+                            Ok(read_word) => {
+                                if let Some(word) = read_word {
+                                    if let Some(active) = self.active_burst.as_mut() {
+                                        active.read_words[beat_index] = word;
+                                    }
+                                }
+                                if beat_index + 1 == total_beats {
+                                    BurstPhase::Ready {
+                                        completed_beats: total_beats,
+                                    }
+                                } else {
+                                    if let Some(active) = self.active_burst.as_mut() {
+                                        active.beat_index += 1;
+                                    }
+                                    BurstPhase::Accepted {
+                                        beat_index: beat_index + 1,
+                                        total_beats,
+                                    }
+                                }
+                            }
+                            Err(error) => BurstPhase::Failed(error),
+                        }
+                    }
+                }
+                terminal => terminal,
+            };
+
+            if let Some(active) = self.active_burst.as_mut() {
+                active.phase = next_phase;
+            }
         }
 
         fn is_busy(&self) -> bool {
-            self.active_transaction.is_some()
+            self.active_transaction.is_some() || self.active_burst.is_some()
         }
     }
 
@@ -565,6 +749,84 @@ mod tests {
                 }
                 TransactionPhase::Failed(error) => {
                     self.active_transaction = None;
+                    Some(Err(error))
+                }
+            }
+        }
+    }
+
+    impl BurstBus for TinyBus {
+        fn submit_burst(&mut self, request: BurstRequest) -> Result<u64, crate::BusError> {
+            if self.active_transaction.is_some() || self.active_burst.is_some() {
+                return Err(crate::BusError::Busy {
+                    remaining_cycles: 1,
+                });
+            }
+
+            let id = self.next_transaction_id;
+            self.next_transaction_id = self.next_transaction_id.wrapping_add(1);
+            let total_beats = request.beats();
+            self.active_burst = Some(ActiveBurst {
+                id,
+                request,
+                beat_index: 0,
+                phase: BurstPhase::Accepted {
+                    beat_index: 0,
+                    total_beats,
+                },
+                read_words: vec![0; total_beats].into_boxed_slice(),
+            });
+            Ok(id)
+        }
+
+        fn burst_phase(&self, id: u64) -> Option<BurstPhase> {
+            self.active_burst
+                .as_ref()
+                .filter(|active| active.id == id)
+                .map(|active| active.phase.clone())
+        }
+
+        fn advance_burst(&mut self, id: u64) -> Option<BurstPhase> {
+            if self
+                .active_burst
+                .as_ref()
+                .is_none_or(|active| active.id != id)
+            {
+                return None;
+            }
+
+            self.tick();
+            self.burst_phase(id)
+        }
+
+        fn take_burst_response(
+            &mut self,
+            id: u64,
+        ) -> Option<Result<BurstResponse, crate::BusError>> {
+            let active = self.active_burst.as_ref()?;
+            if active.id != id {
+                return None;
+            }
+
+            match active.phase.clone() {
+                BurstPhase::Accepted { .. } | BurstPhase::InFlight { .. } => None,
+                BurstPhase::Ready { completed_beats } => {
+                    let active = self
+                        .active_burst
+                        .take()
+                        .expect("ready burst should still be present");
+                    let response = match active.request {
+                        BurstRequest::ReadWords { .. } => {
+                            BurstResponse::ReadWords(active.read_words)
+                        }
+                        BurstRequest::WriteWords { .. } => BurstResponse::WriteComplete {
+                            beats: completed_beats,
+                        },
+                    };
+                    Some(Ok(response))
+                }
+                BurstPhase::Failed(error) => {
+                    self.active_burst = None;
                     Some(Err(error))
                 }
             }
