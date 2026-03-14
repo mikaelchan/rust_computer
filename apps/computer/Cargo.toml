@@ -14,3 +14,7 @@ rvsim-system = { path = "../../crates/system" }
 [[bin]]
 name = "computer"
 path = "src/main.rs"
+
+[[bin]]
+name = "memory_microbench"
+path = "src/bin/memory_microbench.rs"
