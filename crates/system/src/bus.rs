@@ -203,7 +203,7 @@ impl TransactionResponse {
     }
 }
 
-/// Observable lifecycle state for a single outstanding bus transaction.
+/// Observable lifecycle state for an outstanding bus transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransactionPhase {
     Accepted,
@@ -277,7 +277,7 @@ pub enum BurstResponse {
     WriteComplete { beats: usize },
 }
 
-/// Observable lifecycle state for a single outstanding burst.
+/// Observable lifecycle state for an outstanding burst.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BurstPhase {
     Accepted {
@@ -402,7 +402,7 @@ pub trait Bus {
     }
 }
 
-/// A burst-capable bus that exposes an explicit single-outstanding burst lifecycle.
+/// A burst-capable bus that exposes an explicit burst lifecycle.
 pub trait BurstBus: Bus {
     fn submit_burst(&mut self, request: BurstRequest) -> Result<u64, BusError>;
     fn burst_phase(&self, id: u64) -> Option<BurstPhase>;

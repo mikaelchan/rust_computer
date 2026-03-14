@@ -33,6 +33,12 @@ struct ActiveBurst {
     phase: BurstPhase,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompatTransaction {
+    id: u64,
+    request: TransactionRequest,
+}
+
 enum BeatAdvance {
     Phase(BurstPhase),
     Completed(Option<u32>),
@@ -84,8 +90,9 @@ where
 #[derive(Default)]
 pub struct MemoryMap {
     devices: Vec<DeviceSlot>,
-    active_transaction: Option<ActiveTransaction>,
-    active_burst: Option<ActiveBurst>,
+    active_transactions: Vec<ActiveTransaction>,
+    active_bursts: Vec<ActiveBurst>,
+    compat_transaction: Option<CompatTransaction>,
     next_transaction_id: u64,
 }
 
@@ -145,8 +152,9 @@ impl MemoryMap {
     }
 
     pub fn reset(&mut self) {
-        self.active_transaction = None;
-        self.active_burst = None;
+        self.active_transactions.clear();
+        self.active_bursts.clear();
+        self.compat_transaction = None;
         self.next_transaction_id = 0;
         for slot in &mut self.devices {
             slot.device.reset();
@@ -257,41 +265,36 @@ impl MemoryMap {
         }
     }
 
-    fn transaction_remaining_cycles(&self) -> u32 {
-        match self
-            .active_transaction
-            .as_ref()
-            .map(|transaction| &transaction.phase)
-        {
-            Some(TransactionPhase::InFlight { remaining_cycles }) => *remaining_cycles,
-            Some(TransactionPhase::Accepted)
-            | Some(TransactionPhase::Ready(_))
-            | Some(TransactionPhase::Failed(_)) => 1,
-            None => 0,
+    fn transaction_remaining_cycles(phase: &TransactionPhase) -> u32 {
+        match phase {
+            TransactionPhase::InFlight { remaining_cycles } => *remaining_cycles,
+            TransactionPhase::Accepted
+            | TransactionPhase::Ready(_)
+            | TransactionPhase::Failed(_) => 1,
         }
     }
 
-    fn burst_remaining_cycles(&self) -> u32 {
-        match self.active_burst.as_ref().map(|burst| &burst.phase) {
-            Some(BurstPhase::InFlight {
-                remaining_cycles, ..
-            }) => *remaining_cycles,
-            Some(BurstPhase::Accepted { .. })
-            | Some(BurstPhase::Ready { .. })
-            | Some(BurstPhase::Failed(_)) => 1,
-            None => 0,
-        }
+    fn compat_remaining_cycles(&self) -> u32 {
+        self.compat_transaction
+            .and_then(|compat| self.transaction_phase(compat.id))
+            .map(|phase| Self::transaction_remaining_cycles(&phase))
+            .unwrap_or(0)
     }
 
-    fn active_remaining_cycles(&self) -> u32 {
-        self.transaction_remaining_cycles()
-            .max(self.burst_remaining_cycles())
+    fn transaction_index(&self, id: u64) -> Option<usize> {
+        self.active_transactions
+            .iter()
+            .position(|transaction| transaction.id == id)
     }
 
-    fn advance_active_transaction(&mut self) {
+    fn burst_index(&self, id: u64) -> Option<usize> {
+        self.active_bursts.iter().position(|burst| burst.id == id)
+    }
+
+    fn advance_transaction_at(&mut self, index: usize) {
         let Some((device_index, request, phase)) = self
-            .active_transaction
-            .as_ref()
+            .active_transactions
+            .get(index)
             .map(|active| (active.device_index, active.request, active.phase.clone()))
         else {
             return;
@@ -330,14 +333,14 @@ impl MemoryMap {
             ready_or_failed => ready_or_failed,
         };
 
-        if let Some(active) = &mut self.active_transaction {
+        if let Some(active) = self.active_transactions.get_mut(index) {
             active.phase = next_phase;
         }
     }
 
-    fn advance_active_burst(&mut self) {
+    fn advance_burst_at(&mut self, index: usize) {
         let Some((device_index, request, beat_index, phase)) =
-            self.active_burst.as_ref().map(|active| {
+            self.active_bursts.get(index).map(|active| {
                 (
                     active.device_index,
                     active.request.clone(),
@@ -389,7 +392,7 @@ impl MemoryMap {
             ready_or_failed => BeatAdvance::Phase(ready_or_failed),
         };
 
-        if let Some(active) = &mut self.active_burst {
+        if let Some(active) = self.active_bursts.get_mut(index) {
             match next_state {
                 BeatAdvance::Phase(phase) => {
                     active.phase = phase;
@@ -419,62 +422,12 @@ impl MemoryMap {
         }
     }
 
-    fn finish_active_request(&mut self) -> Result<TransactionResponse, BusError> {
-        let phase = self
-            .active_transaction
-            .as_ref()
-            .map(|active| active.phase.clone())
-            .expect("finish_active_request should only be called with an active transaction");
-
-        match phase {
-            TransactionPhase::Accepted => Err(BusError::Busy {
-                remaining_cycles: 1,
-            }),
-            TransactionPhase::InFlight { remaining_cycles } => {
-                Err(BusError::Busy { remaining_cycles })
-            }
-            TransactionPhase::Ready(response) => {
-                self.active_transaction = None;
-                Ok(response)
-            }
-            TransactionPhase::Failed(error) => {
-                self.active_transaction = None;
-                Err(error)
-            }
-        }
-    }
-
-    fn finish_active_burst(&mut self) -> Result<BurstResponse, BusError> {
-        let phase = self
-            .active_burst
-            .as_ref()
-            .map(|active| active.phase.clone())
-            .expect("finish_active_burst should only be called with an active burst");
-
-        match phase {
-            BurstPhase::Accepted { .. } => Err(BusError::Busy {
-                remaining_cycles: 1,
-            }),
-            BurstPhase::InFlight {
-                remaining_cycles, ..
-            } => Err(BusError::Busy { remaining_cycles }),
-            BurstPhase::Ready { completed_beats } => {
-                let active = self
-                    .active_burst
-                    .take()
-                    .expect("ready burst should still be present");
-                let response = match active.request {
-                    BurstRequest::ReadWords { .. } => BurstResponse::ReadWords(active.read_words),
-                    BurstRequest::WriteWords { .. } => BurstResponse::WriteComplete {
-                        beats: completed_beats,
-                    },
-                };
-                Ok(response)
-            }
-            BurstPhase::Failed(error) => {
-                self.active_burst = None;
-                Err(error)
-            }
+    fn clear_compat_if_matches(&mut self, id: u64) {
+        if self
+            .compat_transaction
+            .is_some_and(|compat| compat.id == id)
+        {
+            self.compat_transaction = None;
         }
     }
 
@@ -482,46 +435,51 @@ impl MemoryMap {
         &mut self,
         request: TransactionRequest,
     ) -> Result<TransactionResponse, BusError> {
-        if self.active_burst.is_some() {
-            return Err(BusError::Busy {
-                remaining_cycles: self.active_remaining_cycles(),
-            });
-        }
-
-        if let Some(active) = &self.active_transaction {
-            if active.request != request {
+        match self.compat_transaction {
+            Some(compat) if compat.request != request => {
                 return Err(BusError::Busy {
-                    remaining_cycles: self.active_remaining_cycles(),
+                    remaining_cycles: self.compat_remaining_cycles().max(1),
                 });
             }
-        } else {
-            self.submit_transaction(request)?;
+            Some(compat) if self.transaction_phase(compat.id).is_none() => {
+                self.compat_transaction = None;
+            }
+            Some(_) => {}
+            None => {
+                let id = self.submit_transaction(request)?;
+                self.compat_transaction = Some(CompatTransaction { id, request });
+            }
         }
 
+        let compat = self
+            .compat_transaction
+            .expect("compatibility path should install a transaction");
         if matches!(
-            self.active_transaction.as_ref().map(|active| &active.phase),
+            self.transaction_phase(compat.id),
             Some(TransactionPhase::Accepted)
         ) {
-            self.advance_active_transaction();
+            self.advance_transaction(compat.id);
         }
 
-        self.finish_active_request()
+        match self.take_transaction_response(compat.id) {
+            Some(result) => {
+                self.compat_transaction = None;
+                result
+            }
+            None => Err(BusError::Busy {
+                remaining_cycles: self.compat_remaining_cycles().max(1),
+            }),
+        }
     }
 
-    /// Submit a single transaction to the memory map and leave it in the `Accepted` phase.
+    /// Submit a transaction to the memory map and leave it in the `Accepted` phase.
     pub fn submit_transaction(&mut self, request: TransactionRequest) -> Result<u64, BusError> {
-        if self.active_transaction.is_some() || self.active_burst.is_some() {
-            return Err(BusError::Busy {
-                remaining_cycles: self.active_remaining_cycles(),
-            });
-        }
-
         let device_index = self
             .find_device_index(request.addr)
             .ok_or(BusError::UnmappedAddress { addr: request.addr })?;
         let id = self.next_transaction_id;
         self.next_transaction_id = self.next_transaction_id.wrapping_add(1);
-        self.active_transaction = Some(ActiveTransaction {
+        self.active_transactions.push(ActiveTransaction {
             id,
             device_index,
             request,
@@ -530,26 +488,17 @@ impl MemoryMap {
         Ok(id)
     }
 
-    /// Inspect the current phase of the outstanding transaction, if the IDs match.
+    /// Inspect the current phase of a submitted transaction, if the ID matches.
     #[must_use]
     pub fn transaction_phase(&self, id: u64) -> Option<TransactionPhase> {
-        self.active_transaction
-            .as_ref()
-            .filter(|active| active.id == id)
-            .map(|active| active.phase.clone())
+        self.transaction_index(id)
+            .map(|index| self.active_transactions[index].phase.clone())
     }
 
-    /// Advance the single outstanding transaction by one protocol step.
+    /// Advance a submitted transaction by one protocol step.
     pub fn advance_transaction(&mut self, id: u64) -> Option<TransactionPhase> {
-        if self
-            .active_transaction
-            .as_ref()
-            .is_none_or(|active| active.id != id)
-        {
-            return None;
-        }
-
-        self.advance_active_transaction();
+        let index = self.transaction_index(id)?;
+        self.advance_transaction_at(index);
         self.transaction_phase(id)
     }
 
@@ -558,29 +507,24 @@ impl MemoryMap {
         &mut self,
         id: u64,
     ) -> Option<Result<TransactionResponse, BusError>> {
-        if self
-            .active_transaction
-            .as_ref()
-            .is_none_or(|active| active.id != id)
-        {
-            return None;
-        }
-
-        match self.finish_active_request() {
-            Ok(response) => Some(Ok(response)),
-            Err(BusError::Busy { .. }) => None,
-            Err(error) => Some(Err(error)),
+        let index = self.transaction_index(id)?;
+        match self.active_transactions[index].phase.clone() {
+            TransactionPhase::Accepted | TransactionPhase::InFlight { .. } => None,
+            TransactionPhase::Ready(response) => {
+                self.active_transactions.swap_remove(index);
+                self.clear_compat_if_matches(id);
+                Some(Ok(response))
+            }
+            TransactionPhase::Failed(error) => {
+                self.active_transactions.swap_remove(index);
+                self.clear_compat_if_matches(id);
+                Some(Err(error))
+            }
         }
     }
 
     /// Submit a contiguous 32-bit word burst to the memory map.
     pub fn submit_burst(&mut self, request: BurstRequest) -> Result<u64, BusError> {
-        if self.active_transaction.is_some() || self.active_burst.is_some() {
-            return Err(BusError::Busy {
-                remaining_cycles: self.active_remaining_cycles(),
-            });
-        }
-
         let total_beats = request.beats();
         assert!(
             total_beats > 0,
@@ -603,7 +547,7 @@ impl MemoryMap {
 
         let id = self.next_transaction_id;
         self.next_transaction_id = self.next_transaction_id.wrapping_add(1);
-        self.active_burst = Some(ActiveBurst {
+        self.active_bursts.push(ActiveBurst {
             id,
             device_index,
             request,
@@ -617,43 +561,39 @@ impl MemoryMap {
         Ok(id)
     }
 
-    /// Inspect the current phase of the outstanding burst, if the IDs match.
+    /// Inspect the current phase of a submitted burst, if the ID matches.
     #[must_use]
     pub fn burst_phase(&self, id: u64) -> Option<BurstPhase> {
-        self.active_burst
-            .as_ref()
-            .filter(|active| active.id == id)
-            .map(|active| active.phase.clone())
+        self.burst_index(id)
+            .map(|index| self.active_bursts[index].phase.clone())
     }
 
-    /// Advance the single outstanding burst by one beat-level protocol step.
+    /// Advance a submitted burst by one beat-level protocol step.
     pub fn advance_burst(&mut self, id: u64) -> Option<BurstPhase> {
-        if self
-            .active_burst
-            .as_ref()
-            .is_none_or(|active| active.id != id)
-        {
-            return None;
-        }
-
-        self.advance_active_burst();
+        let index = self.burst_index(id)?;
+        self.advance_burst_at(index);
         self.burst_phase(id)
     }
 
     /// Consume a completed burst response, or a terminal error, if available.
     pub fn take_burst_response(&mut self, id: u64) -> Option<Result<BurstResponse, BusError>> {
-        if self
-            .active_burst
-            .as_ref()
-            .is_none_or(|active| active.id != id)
-        {
-            return None;
-        }
-
-        match self.finish_active_burst() {
-            Ok(response) => Some(Ok(response)),
-            Err(BusError::Busy { .. }) => None,
-            Err(error) => Some(Err(error)),
+        let index = self.burst_index(id)?;
+        match self.active_bursts[index].phase.clone() {
+            BurstPhase::Accepted { .. } | BurstPhase::InFlight { .. } => None,
+            BurstPhase::Ready { completed_beats } => {
+                let active = self.active_bursts.swap_remove(index);
+                let response = match active.request {
+                    BurstRequest::ReadWords { .. } => BurstResponse::ReadWords(active.read_words),
+                    BurstRequest::WriteWords { .. } => BurstResponse::WriteComplete {
+                        beats: completed_beats,
+                    },
+                };
+                Some(Ok(response))
+            }
+            BurstPhase::Failed(error) => {
+                self.active_bursts.swap_remove(index);
+                Some(Err(error))
+            }
         }
     }
 }
@@ -731,15 +671,19 @@ impl Bus for MemoryMap {
     }
 
     fn tick(&mut self) {
-        self.advance_active_transaction();
-        self.advance_active_burst();
+        for index in 0..self.active_transactions.len() {
+            self.advance_transaction_at(index);
+        }
+        for index in 0..self.active_bursts.len() {
+            self.advance_burst_at(index);
+        }
         for slot in &mut self.devices {
             slot.device.tick();
         }
     }
 
     fn is_busy(&self) -> bool {
-        self.active_transaction.is_some() || self.active_burst.is_some()
+        !self.active_transactions.is_empty() || !self.active_bursts.is_empty()
     }
 
     fn pending_interrupts(&self) -> InterruptSet {
@@ -778,8 +722,9 @@ impl fmt::Debug for MemoryMap {
             .map(|slot| (slot.name, slot.range.start, slot.range.size))
             .collect();
         debug
-            .field("active_transaction", &self.active_transaction)
-            .field("active_burst", &self.active_burst)
+            .field("active_transactions", &self.active_transactions)
+            .field("active_bursts", &self.active_bursts)
+            .field("compat_transaction", &self.compat_transaction)
             .field("next_transaction_id", &self.next_transaction_id)
             .field("devices", &devices)
             .finish()
@@ -1051,6 +996,177 @@ mod tests {
             )))
         );
         assert_eq!(map.burst_phase(id), None);
+    }
+
+    #[test]
+    fn explicit_transactions_can_overlap() {
+        let mut map = MemoryMap::new();
+        map.map_device(ByteArrayDevice {
+            range: AddressRange::new(0x1000, 4),
+            bytes: vec![0x11, 0x22, 0x33, 0x44],
+            latency_cycles: 2,
+        })
+        .expect("device should map");
+
+        let first = map
+            .submit_transaction(TransactionRequest::load(0x1000, 1))
+            .expect("first transaction should submit");
+        let second = map
+            .submit_transaction(TransactionRequest::load(0x1001, 1))
+            .expect("second transaction should submit while first is still pending");
+
+        assert_eq!(
+            map.transaction_phase(first),
+            Some(TransactionPhase::Accepted)
+        );
+        assert_eq!(
+            map.transaction_phase(second),
+            Some(TransactionPhase::Accepted)
+        );
+
+        map.tick();
+        assert_eq!(
+            map.transaction_phase(first),
+            Some(TransactionPhase::InFlight {
+                remaining_cycles: 2,
+            })
+        );
+        assert_eq!(
+            map.transaction_phase(second),
+            Some(TransactionPhase::InFlight {
+                remaining_cycles: 2,
+            })
+        );
+
+        map.tick();
+        map.tick();
+
+        assert_eq!(
+            map.take_transaction_response(first),
+            Some(Ok(TransactionResponse::Read {
+                data: [0x11, 0, 0, 0],
+                width: 1,
+            }))
+        );
+        assert_eq!(
+            map.take_transaction_response(second),
+            Some(Ok(TransactionResponse::Read {
+                data: [0x22, 0, 0, 0],
+                width: 1,
+            }))
+        );
+    }
+
+    #[test]
+    fn transaction_and_burst_can_progress_concurrently() {
+        let mut map = MemoryMap::new();
+        map.map_device(ByteArrayDevice {
+            range: AddressRange::new(0x1000, 12),
+            bytes: vec![
+                0x11, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00, 0x33, 0x00, 0x00, 0x00,
+            ],
+            latency_cycles: 1,
+        })
+        .expect("device should map");
+
+        let transaction = map
+            .submit_transaction(TransactionRequest::load(0x1000, 1))
+            .expect("transaction should submit");
+        let burst = map
+            .submit_burst(BurstRequest::read_words(0x1004, 2, AccessKind::Load))
+            .expect("burst should submit while transaction is pending");
+
+        map.tick();
+        assert_eq!(
+            map.transaction_phase(transaction),
+            Some(TransactionPhase::InFlight {
+                remaining_cycles: 1,
+            })
+        );
+        assert_eq!(
+            map.burst_phase(burst),
+            Some(BurstPhase::InFlight {
+                beat_index: 0,
+                total_beats: 2,
+                remaining_cycles: 1,
+            })
+        );
+
+        map.tick();
+        assert_eq!(
+            map.take_transaction_response(transaction),
+            Some(Ok(TransactionResponse::Read {
+                data: [0x11, 0, 0, 0],
+                width: 1,
+            }))
+        );
+        assert_eq!(
+            map.burst_phase(burst),
+            Some(BurstPhase::Accepted {
+                beat_index: 1,
+                total_beats: 2,
+            })
+        );
+
+        map.tick();
+        map.tick();
+        assert_eq!(
+            map.take_burst_response(burst),
+            Some(Ok(BurstResponse::ReadWords(
+                vec![0x22, 0x33].into_boxed_slice()
+            )))
+        );
+    }
+
+    #[test]
+    fn compatibility_bus_request_can_overlap_with_explicit_transaction() {
+        let mut map = MemoryMap::new();
+        map.map_device(ByteArrayDevice {
+            range: AddressRange::new(0x1000, 4),
+            bytes: vec![0xaa, 0xbb, 0xcc, 0xdd],
+            latency_cycles: 1,
+        })
+        .expect("device should map");
+
+        let explicit = map
+            .submit_transaction(TransactionRequest::load(0x1000, 1))
+            .expect("explicit transaction should submit");
+
+        let error = map
+            .load8(0x1001)
+            .expect_err("compatibility request should start and stall");
+        assert_eq!(
+            error,
+            BusError::Busy {
+                remaining_cycles: 1,
+            }
+        );
+        assert_eq!(
+            map.transaction_phase(explicit),
+            Some(TransactionPhase::Accepted)
+        );
+
+        map.tick();
+        assert_eq!(
+            map.load8(0x1001)
+                .expect("compatibility request should complete"),
+            0xbb
+        );
+        assert_eq!(
+            map.transaction_phase(explicit),
+            Some(TransactionPhase::InFlight {
+                remaining_cycles: 1,
+            })
+        );
+
+        map.tick();
+        assert_eq!(
+            map.take_transaction_response(explicit),
+            Some(Ok(TransactionResponse::Read {
+                data: [0xaa, 0, 0, 0],
+                width: 1,
+            }))
+        );
     }
 
     #[test]
