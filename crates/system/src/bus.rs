@@ -401,3 +401,11 @@ pub trait Bus {
         Ok(())
     }
 }
+
+/// A burst-capable bus that exposes an explicit single-outstanding burst lifecycle.
+pub trait BurstBus: Bus {
+    fn submit_burst(&mut self, request: BurstRequest) -> Result<u64, BusError>;
+    fn burst_phase(&self, id: u64) -> Option<BurstPhase>;
+    fn advance_burst(&mut self, id: u64) -> Option<BurstPhase>;
+    fn take_burst_response(&mut self, id: u64) -> Option<Result<BurstResponse, BusError>>;
+}

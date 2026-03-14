@@ -10,9 +10,9 @@ pub mod memory_map;
 
 pub use arbiter::{ArbiterBus, ArbiterStats};
 pub use bus::{
-    AccessKind, Address, AddressRange, Addressable, BurstPhase, BurstRequest, BurstResponse, Bus,
-    BusError, BusMaster, BusMasterRequest, BusMasterResponse, InterruptLine, InterruptSet,
-    TransactionPhase, TransactionRequest, TransactionResponse,
+    AccessKind, Address, AddressRange, Addressable, BurstBus, BurstPhase, BurstRequest,
+    BurstResponse, Bus, BusError, BusMaster, BusMasterRequest, BusMasterResponse, InterruptLine,
+    InterruptSet, TransactionPhase, TransactionRequest, TransactionResponse,
 };
 pub use cache::{
     CacheConfig, CacheStats, DirectMappedCache, ReplacementPolicy, SplitCacheStats, SplitL1Cache,

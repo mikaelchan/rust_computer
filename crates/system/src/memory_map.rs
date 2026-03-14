@@ -4,8 +4,9 @@ use core::fmt;
 use std::{cell::RefCell, rc::Rc};
 
 use crate::bus::{
-    AccessKind, Address, AddressRange, Addressable, BurstPhase, BurstRequest, BurstResponse, Bus,
-    BusError, InterruptSet, TransactionPhase, TransactionRequest, TransactionResponse,
+    AccessKind, Address, AddressRange, Addressable, BurstBus, BurstPhase, BurstRequest,
+    BurstResponse, Bus, BusError, InterruptSet, TransactionPhase, TransactionRequest,
+    TransactionResponse,
 };
 
 struct DeviceSlot {
@@ -747,6 +748,24 @@ impl Bus for MemoryMap {
             .fold(InterruptSet::empty(), |interrupts, slot| {
                 interrupts.union(slot.device.pending_interrupts())
             })
+    }
+}
+
+impl BurstBus for MemoryMap {
+    fn submit_burst(&mut self, request: BurstRequest) -> Result<u64, BusError> {
+        MemoryMap::submit_burst(self, request)
+    }
+
+    fn burst_phase(&self, id: u64) -> Option<BurstPhase> {
+        MemoryMap::burst_phase(self, id)
+    }
+
+    fn advance_burst(&mut self, id: u64) -> Option<BurstPhase> {
+        MemoryMap::advance_burst(self, id)
+    }
+
+    fn take_burst_response(&mut self, id: u64) -> Option<Result<BurstResponse, BusError>> {
+        MemoryMap::take_burst_response(self, id)
     }
 }
 

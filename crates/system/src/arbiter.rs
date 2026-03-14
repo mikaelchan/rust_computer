@@ -2,7 +2,10 @@
 
 use std::{cell::RefCell, fmt, rc::Rc};
 
-use crate::{Bus, BusError, BusMaster, BusMasterRequest, BusMasterResponse, InterruptSet};
+use crate::{
+    BurstBus, BurstPhase, BurstRequest, BurstResponse, Bus, BusError, BusMaster, BusMasterRequest,
+    BusMasterResponse, InterruptSet,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ArbiterStats {
@@ -238,6 +241,28 @@ where
 
     fn pending_interrupts(&self) -> InterruptSet {
         self.inner.pending_interrupts()
+    }
+}
+
+impl<B> BurstBus for ArbiterBus<B>
+where
+    B: BurstBus,
+{
+    fn submit_burst(&mut self, request: BurstRequest) -> Result<u64, BusError> {
+        self.ensure_cpu_slot()?;
+        self.inner.submit_burst(request)
+    }
+
+    fn burst_phase(&self, id: u64) -> Option<BurstPhase> {
+        self.inner.burst_phase(id)
+    }
+
+    fn advance_burst(&mut self, id: u64) -> Option<BurstPhase> {
+        self.inner.advance_burst(id)
+    }
+
+    fn take_burst_response(&mut self, id: u64) -> Option<Result<BurstResponse, BusError>> {
+        self.inner.take_burst_response(id)
     }
 }
 

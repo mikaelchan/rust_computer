@@ -1,6 +1,9 @@
 //! Cache wrappers that sit in front of a backing bus.
 
-use crate::{Address, AddressRange, Bus, BusError, InterruptSet};
+use crate::{
+    AccessKind, Address, AddressRange, BurstBus, BurstPhase, BurstRequest, BurstResponse, Bus,
+    BusError, InterruptSet,
+};
 
 const WORD_BYTES: usize = 4;
 
@@ -253,6 +256,15 @@ enum RefillKind {
     Load,
 }
 
+impl RefillKind {
+    fn access_kind(self) -> AccessKind {
+        match self {
+            Self::Fetch => AccessKind::Fetch,
+            Self::Load => AccessKind::Load,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DecodedAddress {
     line_base: Address,
@@ -300,16 +312,16 @@ impl StoreOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingWriteBack {
     line_base: Address,
-    next_word_index: usize,
     words: Box<[u32]>,
+    burst_id: Option<u64>,
 }
 
 impl PendingWriteBack {
     fn new(line_base: Address, words: &[u32]) -> Self {
         Self {
             line_base,
-            next_word_index: 0,
             words: words.to_vec().into_boxed_slice(),
+            burst_id: None,
         }
     }
 }
@@ -320,9 +332,9 @@ struct PendingRefill {
     set_index: usize,
     tag: u64,
     way_index: usize,
-    next_word_index: usize,
     words: Box<[u32]>,
     kind: RefillKind,
+    burst_id: Option<u64>,
 }
 
 impl PendingRefill {
@@ -339,9 +351,9 @@ impl PendingRefill {
             set_index,
             tag,
             way_index,
-            next_word_index: 0,
             words: vec![0; line_words].into_boxed_slice(),
             kind,
+            burst_id: None,
         }
     }
 }
@@ -356,6 +368,26 @@ impl PendingLineOp {
     fn matches_line(&self, decoded: DecodedAddress) -> bool {
         self.refill.line_base == decoded.line_base
     }
+}
+
+enum BurstDrive<T> {
+    Busy { remaining_cycles: u32 },
+    Ready(T),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveCacheBurst {
+    id: u64,
+    request: BurstRequest,
+    beat_index: usize,
+    read_words: Box<[u32]>,
+    phase: BurstPhase,
+}
+
+enum CacheBeatAdvance {
+    Busy(u32),
+    Completed(Option<u32>),
+    Failed(BusError),
 }
 
 #[derive(Debug, Clone)]
@@ -539,53 +571,140 @@ impl CacheBank {
         });
     }
 
+    fn drive_burst_until_blocked<B>(
+        &self,
+        inner: &mut B,
+        burst_id: &mut Option<u64>,
+        request: BurstRequest,
+    ) -> Result<BurstDrive<BurstResponse>, BusError>
+    where
+        B: BurstBus,
+    {
+        let id = match *burst_id {
+            Some(id) => id,
+            None => {
+                let id = inner.submit_burst(request)?;
+                *burst_id = Some(id);
+                id
+            }
+        };
+
+        loop {
+            let phase = inner
+                .burst_phase(id)
+                .expect("submitted burst should remain active until completion");
+            match phase {
+                BurstPhase::Accepted { .. } => {
+                    let next_phase = inner
+                        .advance_burst(id)
+                        .expect("submitted burst should advance");
+                    match next_phase {
+                        BurstPhase::Accepted { .. } => continue,
+                        BurstPhase::InFlight {
+                            remaining_cycles, ..
+                        } => {
+                            return Ok(BurstDrive::Busy { remaining_cycles });
+                        }
+                        BurstPhase::Ready { .. } => continue,
+                        BurstPhase::Failed(_) => continue,
+                    }
+                }
+                BurstPhase::InFlight {
+                    remaining_cycles, ..
+                } => {
+                    return Ok(BurstDrive::Busy { remaining_cycles });
+                }
+                BurstPhase::Ready { .. } => {
+                    *burst_id = None;
+                    let response = inner
+                        .take_burst_response(id)
+                        .expect("ready burst should yield a response")?;
+                    return Ok(BurstDrive::Ready(response));
+                }
+                BurstPhase::Failed(_) => {
+                    *burst_id = None;
+                    let error = inner
+                        .take_burst_response(id)
+                        .expect("failed burst should yield a terminal error")
+                        .expect_err("failed burst should not produce a success response");
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    fn progress_write_back<B>(
+        &self,
+        inner: &mut B,
+        write_back: &mut PendingWriteBack,
+    ) -> Result<BurstDrive<usize>, BusError>
+    where
+        B: BurstBus,
+    {
+        let request = BurstRequest::write_words(write_back.line_base, write_back.words.clone());
+        match self.drive_burst_until_blocked(inner, &mut write_back.burst_id, request)? {
+            BurstDrive::Busy { remaining_cycles } => Ok(BurstDrive::Busy { remaining_cycles }),
+            BurstDrive::Ready(BurstResponse::WriteComplete { beats }) => {
+                Ok(BurstDrive::Ready(beats))
+            }
+            BurstDrive::Ready(BurstResponse::ReadWords(_)) => {
+                unreachable!("write-back bursts should complete as writes")
+            }
+        }
+    }
+
+    fn progress_refill<B>(
+        &self,
+        inner: &mut B,
+        refill: &mut PendingRefill,
+    ) -> Result<BurstDrive<Box<[u32]>>, BusError>
+    where
+        B: BurstBus,
+    {
+        let request = BurstRequest::read_words(
+            refill.line_base,
+            refill.words.len(),
+            refill.kind.access_kind(),
+        );
+        match self.drive_burst_until_blocked(inner, &mut refill.burst_id, request)? {
+            BurstDrive::Busy { remaining_cycles } => Ok(BurstDrive::Busy { remaining_cycles }),
+            BurstDrive::Ready(BurstResponse::ReadWords(words)) => Ok(BurstDrive::Ready(words)),
+            BurstDrive::Ready(BurstResponse::WriteComplete { .. }) => {
+                unreachable!("refill bursts should complete as reads")
+            }
+        }
+    }
+
     fn continue_pending<B>(&mut self, inner: &mut B) -> Result<(), BusError>
     where
-        B: Bus,
+        B: BurstBus,
     {
         let Some(mut pending) = self.pending.take() else {
             return Ok(());
         };
 
         if let Some(write_back) = &mut pending.write_back {
-            while write_back.next_word_index < write_back.words.len() {
-                let word_addr =
-                    write_back.line_base + (write_back.next_word_index * WORD_BYTES) as u64;
-                match inner.store32(word_addr, write_back.words[write_back.next_word_index]) {
-                    Ok(()) => {
-                        write_back.next_word_index += 1;
-                        self.stats.write_back_words += 1;
-                    }
-                    Err(BusError::Busy { remaining_cycles }) => {
-                        self.pending = Some(pending);
-                        return Err(BusError::Busy { remaining_cycles });
-                    }
-                    Err(error) => return Err(error),
+            match self.progress_write_back(inner, write_back)? {
+                BurstDrive::Busy { remaining_cycles } => {
+                    self.pending = Some(pending);
+                    return Err(BusError::Busy { remaining_cycles });
+                }
+                BurstDrive::Ready(beats) => {
+                    self.stats.write_back_words += beats as u64;
                 }
             }
             self.stats.write_backs += 1;
             pending.write_back = None;
         }
 
-        while pending.refill.next_word_index < pending.refill.words.len() {
-            let word_addr =
-                pending.refill.line_base + (pending.refill.next_word_index * WORD_BYTES) as u64;
-            let result = match pending.refill.kind {
-                RefillKind::Fetch => inner.fetch32(word_addr),
-                RefillKind::Load => inner.load32(word_addr),
-            };
-
-            match result {
-                Ok(word) => {
-                    pending.refill.words[pending.refill.next_word_index] = word;
-                    pending.refill.next_word_index += 1;
-                    self.stats.refill_words += 1;
-                }
-                Err(BusError::Busy { remaining_cycles }) => {
-                    self.pending = Some(pending);
-                    return Err(BusError::Busy { remaining_cycles });
-                }
-                Err(error) => return Err(error),
+        match self.progress_refill(inner, &mut pending.refill)? {
+            BurstDrive::Busy { remaining_cycles } => {
+                self.pending = Some(pending);
+                return Err(BusError::Busy { remaining_cycles });
+            }
+            BurstDrive::Ready(words) => {
+                self.stats.refill_words += words.len() as u64;
+                pending.refill.words = words;
             }
         }
 
@@ -608,7 +727,7 @@ impl CacheBank {
         kind: RefillKind,
     ) -> Result<(DecodedAddress, usize), BusError>
     where
-        B: Bus,
+        B: BurstBus,
     {
         let decoded = self.decode(addr);
 
@@ -641,7 +760,7 @@ impl CacheBank {
         kind: RefillKind,
     ) -> Result<u32, BusError>
     where
-        B: Bus,
+        B: BurstBus,
     {
         let (decoded, way_index) = self.ensure_line(inner, addr, kind)?;
         let word = self.read_word(decoded, way_index);
@@ -679,7 +798,7 @@ impl CacheBank {
 
     fn store<B>(&mut self, inner: &mut B, store: StoreOp) -> Result<(), BusError>
     where
-        B: Bus,
+        B: BurstBus,
     {
         self.note_write_access();
 
@@ -770,6 +889,8 @@ impl CacheBank {
 pub struct DirectMappedCache<B> {
     inner: B,
     bank: CacheBank,
+    active_burst: Option<ActiveCacheBurst>,
+    next_burst_id: u64,
 }
 
 impl<B> DirectMappedCache<B>
@@ -781,6 +902,8 @@ where
         Self {
             inner,
             bank: CacheBank::new(config),
+            active_burst: None,
+            next_burst_id: 0,
         }
     }
 
@@ -801,6 +924,108 @@ where
     #[must_use]
     pub fn config(&self) -> &CacheConfig {
         self.bank.config()
+    }
+}
+
+impl<B> DirectMappedCache<B>
+where
+    B: BurstBus,
+{
+    fn active_burst_remaining_cycles(&self) -> u32 {
+        match self.active_burst.as_ref().map(|active| &active.phase) {
+            Some(BurstPhase::InFlight {
+                remaining_cycles, ..
+            }) => *remaining_cycles,
+            Some(BurstPhase::Accepted { .. })
+            | Some(BurstPhase::Ready { .. })
+            | Some(BurstPhase::Failed(_)) => 1,
+            None => 0,
+        }
+    }
+
+    fn busy_remaining_cycles(&self) -> u32 {
+        let active_cycles = self.active_burst_remaining_cycles();
+        if active_cycles != 0 {
+            active_cycles
+        } else if self.bank.has_pending_activity() || self.inner.is_busy() {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn execute_burst_beat(
+        &mut self,
+        request: &BurstRequest,
+        beat_index: usize,
+    ) -> Result<Option<u32>, BusError> {
+        let addr = request.beat_addr(beat_index);
+        match request {
+            BurstRequest::ReadWords { kind, .. } => match kind {
+                AccessKind::Fetch => <Self as Bus>::fetch32(self, addr).map(Some),
+                AccessKind::Load => <Self as Bus>::load32(self, addr).map(Some),
+                AccessKind::Store => unreachable!("read burst cannot carry store access kind"),
+            },
+            BurstRequest::WriteWords { words, .. } => {
+                <Self as Bus>::store32(self, addr, words[beat_index]).map(|()| None)
+            }
+        }
+    }
+
+    fn advance_active_burst(&mut self) {
+        let Some((request, beat_index, phase)) = self.active_burst.as_ref().map(|active| {
+            (
+                active.request.clone(),
+                active.beat_index,
+                active.phase.clone(),
+            )
+        }) else {
+            return;
+        };
+
+        if matches!(phase, BurstPhase::Ready { .. } | BurstPhase::Failed(_)) {
+            return;
+        }
+
+        let total_beats = request.beats();
+        let next_state = match self.execute_burst_beat(&request, beat_index) {
+            Ok(read_word) => CacheBeatAdvance::Completed(read_word),
+            Err(BusError::Busy { remaining_cycles }) => CacheBeatAdvance::Busy(remaining_cycles),
+            Err(error) => CacheBeatAdvance::Failed(error),
+        };
+
+        if let Some(active) = &mut self.active_burst {
+            match next_state {
+                CacheBeatAdvance::Busy(remaining_cycles) => {
+                    active.phase = BurstPhase::InFlight {
+                        beat_index,
+                        total_beats,
+                        remaining_cycles,
+                    };
+                }
+                CacheBeatAdvance::Completed(read_word) => {
+                    if let Some(word) = read_word {
+                        active.read_words[beat_index] = word;
+                    }
+
+                    let next_beat_index = beat_index + 1;
+                    active.beat_index = next_beat_index;
+                    active.phase = if next_beat_index == total_beats {
+                        BurstPhase::Ready {
+                            completed_beats: total_beats,
+                        }
+                    } else {
+                        BurstPhase::Accepted {
+                            beat_index: next_beat_index,
+                            total_beats,
+                        }
+                    };
+                }
+                CacheBeatAdvance::Failed(error) => {
+                    active.phase = BurstPhase::Failed(error);
+                }
+            }
+        }
     }
 }
 
@@ -865,7 +1090,7 @@ fn extract_half(word: u32, addr: Address) -> u16 {
 
 fn load_cached_byte<B>(bank: &mut CacheBank, inner: &mut B, addr: Address) -> Result<u8, BusError>
 where
-    B: Bus,
+    B: BurstBus,
 {
     let word = bank.load_word(inner, addr & !0b11, RefillKind::Load)?;
     Ok(extract_byte(word, addr))
@@ -873,7 +1098,7 @@ where
 
 fn load_cached_half<B>(bank: &mut CacheBank, inner: &mut B, addr: Address) -> Result<u16, BusError>
 where
-    B: Bus,
+    B: BurstBus,
 {
     let word = bank.load_word(inner, addr & !0b11, RefillKind::Load)?;
     Ok(extract_half(word, addr))
@@ -881,10 +1106,12 @@ where
 
 impl<B> Bus for DirectMappedCache<B>
 where
-    B: Bus,
+    B: BurstBus,
 {
     fn reset(&mut self) {
         self.bank.reset();
+        self.active_burst = None;
+        self.next_burst_id = 0;
         self.inner.reset();
     }
 
@@ -983,10 +1210,11 @@ where
 
     fn tick(&mut self) {
         self.inner.tick();
+        self.advance_active_burst();
     }
 
     fn is_busy(&self) -> bool {
-        self.bank.has_pending_activity() || self.inner.is_busy()
+        self.active_burst.is_some() || self.bank.has_pending_activity() || self.inner.is_busy()
     }
 
     fn pending_interrupts(&self) -> InterruptSet {
@@ -994,9 +1222,97 @@ where
     }
 }
 
+impl<B> BurstBus for DirectMappedCache<B>
+where
+    B: BurstBus,
+{
+    fn submit_burst(&mut self, request: BurstRequest) -> Result<u64, BusError> {
+        if self.active_burst.is_some() || self.bank.has_pending_activity() || self.inner.is_busy() {
+            return Err(BusError::Busy {
+                remaining_cycles: self.busy_remaining_cycles().max(1),
+            });
+        }
+
+        let total_beats = request.beats();
+        assert!(
+            total_beats > 0,
+            "burst request must contain at least one beat"
+        );
+
+        let id = self.next_burst_id;
+        self.next_burst_id = self.next_burst_id.wrapping_add(1);
+        self.active_burst = Some(ActiveCacheBurst {
+            id,
+            request,
+            beat_index: 0,
+            read_words: vec![0; total_beats].into_boxed_slice(),
+            phase: BurstPhase::Accepted {
+                beat_index: 0,
+                total_beats,
+            },
+        });
+        Ok(id)
+    }
+
+    fn burst_phase(&self, id: u64) -> Option<BurstPhase> {
+        self.active_burst
+            .as_ref()
+            .filter(|active| active.id == id)
+            .map(|active| active.phase.clone())
+    }
+
+    fn advance_burst(&mut self, id: u64) -> Option<BurstPhase> {
+        if self
+            .active_burst
+            .as_ref()
+            .is_none_or(|active| active.id != id)
+        {
+            return None;
+        }
+
+        self.advance_active_burst();
+        self.burst_phase(id)
+    }
+
+    fn take_burst_response(&mut self, id: u64) -> Option<Result<BurstResponse, BusError>> {
+        let active = self.active_burst.as_ref()?;
+        if active.id != id {
+            return None;
+        }
+
+        match &active.phase {
+            BurstPhase::Accepted { .. } | BurstPhase::InFlight { .. } => None,
+            BurstPhase::Ready { completed_beats } => {
+                let completed_beats = *completed_beats;
+                let active = self
+                    .active_burst
+                    .take()
+                    .expect("ready burst should still be present");
+                let response = match active.request {
+                    BurstRequest::ReadWords { .. } => BurstResponse::ReadWords(active.read_words),
+                    BurstRequest::WriteWords { .. } => BurstResponse::WriteComplete {
+                        beats: completed_beats,
+                    },
+                };
+                Some(Ok(response))
+            }
+            BurstPhase::Failed(_) => {
+                let active = self
+                    .active_burst
+                    .take()
+                    .expect("failed burst should still be present");
+                let BurstPhase::Failed(error) = active.phase else {
+                    unreachable!("failed burst must preserve its terminal phase");
+                };
+                Some(Err(error))
+            }
+        }
+    }
+}
+
 impl<B> Bus for SplitL1Cache<B>
 where
-    B: Bus,
+    B: BurstBus,
 {
     fn reset(&mut self) {
         self.instruction.reset();
@@ -1121,7 +1437,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::{AccessKind, AddressRange, Addressable, Bus, BusError, MemoryMap};
+    use crate::{
+        AccessKind, AddressRange, Addressable, BurstBus, BurstPhase, BurstRequest, BurstResponse,
+        Bus, BusError, MemoryMap,
+    };
 
     use super::{
         CacheConfig, DirectMappedCache, ReplacementPolicy, SplitL1Cache, StoreAllocationPolicy,
@@ -1163,6 +1482,115 @@ mod tests {
             }
 
             Ok((addr - self.range.start) as usize)
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    struct TrafficCounters {
+        read_bursts: u64,
+        write_bursts: u64,
+        fetch32_calls: u64,
+        load32_calls: u64,
+        store32_calls: u64,
+    }
+
+    #[derive(Debug)]
+    struct TrackingBus<B> {
+        inner: B,
+        counters: TrafficCounters,
+    }
+
+    impl<B> TrackingBus<B> {
+        fn new(inner: B) -> Self {
+            Self {
+                inner,
+                counters: TrafficCounters::default(),
+            }
+        }
+
+        fn inner_mut(&mut self) -> &mut B {
+            &mut self.inner
+        }
+
+        fn counters(&self) -> TrafficCounters {
+            self.counters
+        }
+    }
+
+    impl<B> Bus for TrackingBus<B>
+    where
+        B: Bus,
+    {
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+
+        fn fetch32(&mut self, addr: u64) -> Result<u32, BusError> {
+            self.counters.fetch32_calls += 1;
+            self.inner.fetch32(addr)
+        }
+
+        fn load8(&mut self, addr: u64) -> Result<u8, BusError> {
+            self.inner.load8(addr)
+        }
+
+        fn store8(&mut self, addr: u64, value: u8) -> Result<(), BusError> {
+            self.inner.store8(addr, value)
+        }
+
+        fn load16(&mut self, addr: u64) -> Result<u16, BusError> {
+            self.inner.load16(addr)
+        }
+
+        fn load32(&mut self, addr: u64) -> Result<u32, BusError> {
+            self.counters.load32_calls += 1;
+            self.inner.load32(addr)
+        }
+
+        fn store16(&mut self, addr: u64, value: u16) -> Result<(), BusError> {
+            self.inner.store16(addr, value)
+        }
+
+        fn store32(&mut self, addr: u64, value: u32) -> Result<(), BusError> {
+            self.counters.store32_calls += 1;
+            self.inner.store32(addr, value)
+        }
+
+        fn tick(&mut self) {
+            self.inner.tick();
+        }
+
+        fn is_busy(&self) -> bool {
+            self.inner.is_busy()
+        }
+
+        fn pending_interrupts(&self) -> crate::InterruptSet {
+            self.inner.pending_interrupts()
+        }
+    }
+
+    impl<B> BurstBus for TrackingBus<B>
+    where
+        B: BurstBus,
+    {
+        fn submit_burst(&mut self, request: BurstRequest) -> Result<u64, BusError> {
+            match &request {
+                BurstRequest::ReadWords { .. } => self.counters.read_bursts += 1,
+                BurstRequest::WriteWords { .. } => self.counters.write_bursts += 1,
+            }
+            self.inner.submit_burst(request)
+        }
+
+        fn burst_phase(&self, id: u64) -> Option<BurstPhase> {
+            self.inner.burst_phase(id)
+        }
+
+        fn advance_burst(&mut self, id: u64) -> Option<BurstPhase> {
+            self.inner.advance_burst(id)
+        }
+
+        fn take_burst_response(&mut self, id: u64) -> Option<Result<BurstResponse, BusError>> {
+            self.inner.take_burst_response(id)
         }
     }
 
@@ -1402,6 +1830,50 @@ mod tests {
         assert_eq!(cache.stats().write_back_words, 1);
         assert_eq!(cache.stats().refills, 2);
         assert_eq!(cache.stats().refill_words, 2);
+    }
+
+    #[test]
+    fn line_refills_and_write_backs_use_lower_bursts() {
+        const RAM_BASE: u64 = 0x1000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(WordDevice::new_zeroed(RAM_BASE, 0x1000, 1))
+            .expect("ram should map");
+
+        let mut cache = DirectMappedCache::new(
+            TrackingBus::new(memory),
+            CacheConfig::new(1, vec![crate::AddressRange::new(RAM_BASE, 0x1000)])
+                .with_line_size(16)
+                .with_write_policy(WritePolicy::WriteBack)
+                .with_store_allocation_policy(StoreAllocationPolicy::WriteAllocate),
+        );
+
+        assert_eq!(retry_load32(&mut cache, RAM_BASE), 0);
+        retry_store32(&mut cache, RAM_BASE, 1);
+        retry_store32(&mut cache, RAM_BASE + 4, 2);
+        retry_store32(&mut cache, RAM_BASE + 8, 3);
+        retry_store32(&mut cache, RAM_BASE + 12, 4);
+        assert_eq!(retry_load32(&mut cache, RAM_BASE + 16), 0);
+
+        assert_eq!(
+            cache.inner().counters(),
+            TrafficCounters {
+                read_bursts: 2,
+                write_bursts: 1,
+                fetch32_calls: 0,
+                load32_calls: 0,
+                store32_calls: 0,
+            }
+        );
+        assert_eq!(cache.stats().write_back_words, 4);
+        assert_eq!(cache.stats().refill_words, 8);
+
+        let memory = cache.inner_mut().inner_mut();
+        assert_eq!(retry_load32(memory, RAM_BASE), 1);
+        assert_eq!(retry_load32(memory, RAM_BASE + 4), 2);
+        assert_eq!(retry_load32(memory, RAM_BASE + 8), 3);
+        assert_eq!(retry_load32(memory, RAM_BASE + 12), 4);
     }
 
     #[test]
