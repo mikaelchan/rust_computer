@@ -553,8 +553,8 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use rvsim_devices::{
-        DmaController, InterruptController, LatencyAdapter, MachineSoftwareInterrupt, MachineTimer,
-        Ram, Rom, SupervisorSoftwareInterrupt,
+        BlockDevice, DmaController, InterruptController, LatencyAdapter, MachineSoftwareInterrupt,
+        MachineTimer, Ram, Rom, SupervisorSoftwareInterrupt,
     };
     use rvsim_system::{
         AddressRange, ArbiterBus, Bus, BusError, CacheConfig, Machine, MemoryMap, Processor,
@@ -2397,6 +2397,151 @@ mod tests {
                 .bus_mut()
                 .load32(RAM_BASE + 0x44)
                 .expect("copied word 1 should read"),
+            0x5566_7788
+        );
+        assert_eq!(machine.cpu().stats().trap_count, 1);
+        assert_eq!(machine.cpu().stats().trap_flushes, 1);
+    }
+
+    #[test]
+    fn takes_delegated_supervisor_external_interrupt_from_block_device_completion() {
+        const BLOCK_BASE: u64 = 0x7000_0000;
+        const BLOCK_BYTES: usize = 16;
+        const BLOCK_ROUTE_OFFSET: u64 = BlockDevice::route_offset(BLOCK_BYTES);
+
+        let mut block_device = BlockDevice::new(BLOCK_BASE, 4, BLOCK_BYTES, 2);
+        block_device
+            .write_block_contents(
+                1,
+                &[
+                    0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55, 0, 0, 0, 0, 0, 0, 0, 0,
+                ],
+            )
+            .expect("block image should load");
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Rom::from_words(
+                0,
+                &[
+                    encode_addi(1, 0, 5),
+                    encode_jal(0, 0),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    encode_lui(2, 0x70000),
+                    encode_addi(3, 0, 8),
+                    encode_sw(3, 2, 4),
+                    encode_addi(10, 0, 7),
+                    encode_sret(),
+                    encode_jal(0, 0),
+                ],
+            ))
+            .expect("rom should map");
+        memory
+            .map_device(block_device)
+            .expect("block device should map");
+
+        let mut machine = Machine::new(PipelineCore::new(0), memory);
+        machine.cpu_mut().hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mideleg, 1 << 9);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sie, 1 << 9);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x20);
+
+        for _ in 0..5 {
+            machine
+                .step_cycle()
+                .expect("pipeline warmup cycle should work");
+        }
+
+        machine
+            .bus_mut()
+            .store32(BLOCK_BASE + BlockDevice::BLOCK_INDEX_OFFSET, 1)
+            .expect("block index should program");
+        machine
+            .bus_mut()
+            .store32(BLOCK_BASE + BLOCK_ROUTE_OFFSET, 1)
+            .expect("block route should program");
+        machine
+            .bus_mut()
+            .store32(
+                BLOCK_BASE + BlockDevice::CONTROL_OFFSET,
+                BlockDevice::CONTROL_START_READ | BlockDevice::CONTROL_IRQ_ENABLE,
+            )
+            .expect("block read should start");
+
+        for _ in 0..48 {
+            machine
+                .step_cycle()
+                .expect("pipeline supervisor block interrupt cycle should work");
+            if machine.cpu().hart_state().registers.read(10) == 7
+                && matches!(
+                    machine.cpu().hart_state().privilege,
+                    crate::state::PrivilegeMode::User
+                )
+                && machine
+                    .bus_mut()
+                    .pending_interrupts()
+                    .highest_priority()
+                    .is_none()
+            {
+                break;
+            }
+        }
+
+        assert_eq!(machine.cpu().hart_state().registers.read(1), 5);
+        assert_eq!(machine.cpu().hart_state().registers.read(10), 7);
+        assert_eq!(
+            machine.cpu().hart_state().privilege,
+            crate::state::PrivilegeMode::User
+        );
+        assert_eq!(
+            machine
+                .cpu()
+                .hart_state()
+                .csrs
+                .read(rvsim_isa::CsrAddress::Scause),
+            (1_u32 << 31) | 9
+        );
+        assert_eq!(
+            machine
+                .bus_mut()
+                .load32(BLOCK_BASE + BlockDevice::CONTROL_OFFSET)
+                .expect("block control should read")
+                & BlockDevice::STATUS_DONE,
+            0
+        );
+        assert_eq!(
+            machine.bus_mut().pending_interrupts().highest_priority(),
+            None
+        );
+        assert_eq!(
+            machine
+                .bus_mut()
+                .load32(BLOCK_BASE + BlockDevice::DATA_WINDOW_OFFSET)
+                .expect("block data word 0 should read"),
+            0x1122_3344
+        );
+        assert_eq!(
+            machine
+                .bus_mut()
+                .load32(BLOCK_BASE + BlockDevice::DATA_WINDOW_OFFSET + 4)
+                .expect("block data word 1 should read"),
             0x5566_7788
         );
         assert_eq!(machine.cpu().stats().trap_count, 1);

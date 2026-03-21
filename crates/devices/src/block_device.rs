@@ -1,6 +1,36 @@
 use rvsim_system::{Address, AddressRange, Addressable, BusError, InterruptLine, InterruptSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptRoute {
+    MachineExternal,
+    SupervisorExternal,
+}
+
+impl InterruptRoute {
+    const fn from_register(value: u32) -> Self {
+        if (value & 1) != 0 {
+            Self::SupervisorExternal
+        } else {
+            Self::MachineExternal
+        }
+    }
+
+    const fn register_bits(self) -> u32 {
+        match self {
+            Self::MachineExternal => 0,
+            Self::SupervisorExternal => 1,
+        }
+    }
+
+    const fn interrupt_line(self) -> InterruptLine {
+        match self {
+            Self::MachineExternal => InterruptLine::MachineExternal,
+            Self::SupervisorExternal => InterruptLine::SupervisorExternal,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BlockCommand {
     ReadBlock,
     WriteBlock,
@@ -28,6 +58,7 @@ pub struct BlockDevice {
     irq_enabled: bool,
     done: bool,
     error: bool,
+    interrupt_route: InterruptRoute,
     staging: Box<[u8]>,
     storage: Vec<u8>,
     active: Option<ActiveCommand>,
@@ -48,6 +79,11 @@ impl BlockDevice {
     pub const STATUS_ERROR: u32 = 1 << 5;
 
     #[must_use]
+    pub const fn route_offset(block_bytes: usize) -> Address {
+        Self::DATA_WINDOW_OFFSET + block_bytes as u64
+    }
+
+    #[must_use]
     pub fn new(
         base: Address,
         block_count: u32,
@@ -62,7 +98,7 @@ impl BlockDevice {
 
         let total_bytes = block_count as usize * block_bytes;
         Self {
-            range: AddressRange::new(base, Self::DATA_WINDOW_OFFSET + block_bytes as u64),
+            range: AddressRange::new(base, Self::route_offset(block_bytes) + 4),
             block_count,
             block_bytes,
             operation_latency,
@@ -70,6 +106,7 @@ impl BlockDevice {
             irq_enabled: false,
             done: false,
             error: false,
+            interrupt_route: InterruptRoute::MachineExternal,
             staging: vec![0; block_bytes].into_boxed_slice(),
             storage: vec![0; total_bytes],
             active: None,
@@ -130,6 +167,10 @@ impl BlockDevice {
 
         let start = index as usize * self.block_bytes;
         Some(start..start + self.block_bytes)
+    }
+
+    const fn route_offset_for_instance(&self) -> Address {
+        Self::route_offset(self.block_bytes)
     }
 
     fn control_word(&self) -> u32 {
@@ -222,6 +263,12 @@ impl BlockDevice {
             }
             Self::BLOCK_BYTES_OFFSET..=15 => (self.block_bytes as u32).to_le_bytes()
                 [(offset - Self::BLOCK_BYTES_OFFSET) as usize],
+            _ if offset >= self.route_offset_for_instance()
+                && offset < self.route_offset_for_instance() + 4 =>
+            {
+                self.interrupt_route.register_bits().to_le_bytes()
+                    [(offset - self.route_offset_for_instance()) as usize]
+            }
             Self::DATA_WINDOW_OFFSET.. => {
                 let index = (offset - Self::DATA_WINDOW_OFFSET) as usize;
                 *self.staging.get(index).ok_or(BusError::UnmappedAddress {
@@ -247,6 +294,7 @@ impl Addressable for BlockDevice {
         self.irq_enabled = false;
         self.done = false;
         self.error = false;
+        self.interrupt_route = InterruptRoute::MachineExternal;
         self.staging.fill(0);
         self.storage.fill(0);
         self.active = None;
@@ -271,7 +319,7 @@ impl Addressable for BlockDevice {
 
     fn pending_interrupts(&self) -> InterruptSet {
         if self.irq_enabled && (self.done || self.error) {
-            InterruptSet::from(InterruptLine::MachineExternal)
+            InterruptSet::from(self.interrupt_route.interrupt_line())
         } else {
             InterruptSet::empty()
         }
@@ -298,6 +346,17 @@ impl Addressable for BlockDevice {
                 Ok(())
             }
             Self::BLOCK_COUNT_OFFSET..=15 => Err(BusError::ReadOnlyAddress { addr }),
+            _ if offset >= self.route_offset_for_instance()
+                && offset < self.route_offset_for_instance() + 4 =>
+            {
+                let mut route = self.interrupt_route.register_bits();
+                let route_byte = (offset - self.route_offset_for_instance()) as usize;
+                let mut bytes = route.to_le_bytes();
+                bytes[route_byte] = value;
+                route = u32::from_le_bytes(bytes);
+                self.interrupt_route = InterruptRoute::from_register(route);
+                Ok(())
+            }
             Self::DATA_WINDOW_OFFSET.. => {
                 let index = (offset - Self::DATA_WINDOW_OFFSET) as usize;
                 let byte = self
@@ -424,6 +483,40 @@ mod tests {
             device.pending_interrupt(),
             Some(InterruptLine::MachineExternal)
         );
+    }
+
+    #[test]
+    fn completion_interrupt_can_route_to_supervisor_external() {
+        let mut device = BlockDevice::new(BLOCK_BASE, 4, BLOCK_BYTES, 1);
+        let route_offset = BlockDevice::route_offset(BLOCK_BYTES);
+        device
+            .write_block_contents(1, &block_bytes([11, 22, 33, 44]))
+            .expect("block image should load");
+
+        write_u32(&mut device, BLOCK_BASE + BlockDevice::BLOCK_INDEX_OFFSET, 1);
+        write_u32(&mut device, BLOCK_BASE + route_offset, 1);
+        write_u32(
+            &mut device,
+            BLOCK_BASE + BlockDevice::CONTROL_OFFSET,
+            BlockDevice::CONTROL_START_READ | BlockDevice::CONTROL_IRQ_ENABLE,
+        );
+
+        device.tick();
+
+        assert_eq!(
+            device.pending_interrupt(),
+            Some(InterruptLine::SupervisorExternal)
+        );
+    }
+
+    #[test]
+    fn route_register_masks_reserved_bits() {
+        let mut device = BlockDevice::new(BLOCK_BASE, 2, BLOCK_BYTES, 0);
+        let route_offset = BlockDevice::route_offset(BLOCK_BYTES);
+
+        write_u32(&mut device, BLOCK_BASE + route_offset, u32::MAX);
+
+        assert_eq!(read_u32(&mut device, BLOCK_BASE + route_offset), 1);
     }
 
     #[test]
