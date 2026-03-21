@@ -742,6 +742,32 @@ mod tests {
     }
 
     #[test]
+    fn machine_trap_entry_records_mpp_and_mpie_for_supervisor_source() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mstatus, super::MSTATUS_MIE);
+        csrs.write(CsrAddress::Mtvec, 0x40);
+
+        let (privilege, handler_pc) = csrs.enter_trap(
+            Trap::Interrupt(Interrupt::MachineTimer),
+            0x20,
+            PrivilegeMode::Supervisor,
+        );
+
+        assert_eq!(privilege, PrivilegeMode::Machine);
+        assert_eq!(handler_pc, 0x40);
+        assert_eq!(csrs.read(CsrAddress::Mepc), 0x20);
+        assert_eq!(csrs.read(CsrAddress::Mstatus) & super::MSTATUS_MIE, 0);
+        assert_eq!(
+            csrs.read(CsrAddress::Mstatus) & super::MSTATUS_MPIE,
+            super::MSTATUS_MPIE
+        );
+        assert_eq!(
+            csrs.read(CsrAddress::Mstatus) & super::MSTATUS_MPP_MASK,
+            1 << super::MSTATUS_MPP_SHIFT
+        );
+    }
+
+    #[test]
     fn delegated_supervisor_interrupt_enters_supervisor_trap_state() {
         let mut csrs = CsrFile::default();
         csrs.write(CsrAddress::Mideleg, 1 << 1);
@@ -782,6 +808,33 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_trap_entry_records_spp_and_spie_for_supervisor_source() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mideleg, 1 << 5);
+        csrs.write(CsrAddress::Sstatus, super::MSTATUS_SIE);
+        csrs.write(CsrAddress::Stvec, 0x80);
+
+        let (privilege, handler_pc) = csrs.enter_trap(
+            Trap::Interrupt(Interrupt::SupervisorTimer),
+            0x24,
+            PrivilegeMode::Supervisor,
+        );
+
+        assert_eq!(privilege, PrivilegeMode::Supervisor);
+        assert_eq!(handler_pc, 0x80);
+        assert_eq!(csrs.read(CsrAddress::Sepc), 0x24);
+        assert_eq!(csrs.read(CsrAddress::Sstatus) & super::MSTATUS_SIE, 0);
+        assert_eq!(
+            csrs.read(CsrAddress::Sstatus) & super::MSTATUS_SPIE,
+            super::MSTATUS_SPIE
+        );
+        assert_eq!(
+            csrs.read(CsrAddress::Sstatus) & super::MSTATUS_SPP,
+            super::MSTATUS_SPP
+        );
+    }
+
+    #[test]
     fn delegated_user_ecall_enters_supervisor_trap_state() {
         let mut csrs = CsrFile::default();
         csrs.write(CsrAddress::Medeleg, 1 << 8);
@@ -804,6 +857,30 @@ mod tests {
     }
 
     #[test]
+    fn machine_return_restores_supervisor_mode_and_mepc() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mepc, 0x44);
+        csrs.write(
+            CsrAddress::Mstatus,
+            super::MSTATUS_MPIE | (1 << super::MSTATUS_MPP_SHIFT),
+        );
+
+        let (privilege, pc) = csrs.return_from_machine_trap();
+
+        assert_eq!(privilege, PrivilegeMode::Supervisor);
+        assert_eq!(pc, 0x44);
+        assert_eq!(
+            csrs.read(CsrAddress::Mstatus) & super::MSTATUS_MIE,
+            super::MSTATUS_MIE
+        );
+        assert_eq!(
+            csrs.read(CsrAddress::Mstatus) & super::MSTATUS_MPIE,
+            super::MSTATUS_MPIE
+        );
+        assert_eq!(csrs.read(CsrAddress::Mstatus) & super::MSTATUS_MPP_MASK, 0);
+    }
+
+    #[test]
     fn supervisor_return_restores_user_mode_and_sepc() {
         let mut csrs = CsrFile::default();
         csrs.write(CsrAddress::Sepc, 0x44);
@@ -815,6 +892,79 @@ mod tests {
         assert_eq!(pc, 0x44);
         assert_eq!(csrs.read(CsrAddress::Sstatus) & (1 << 1), 1 << 1);
         assert_eq!(csrs.read(CsrAddress::Sstatus) & (1 << 8), 0);
+    }
+
+    #[test]
+    fn machine_nested_return_can_resume_same_mode_when_software_restores_saved_state() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mstatus, super::MSTATUS_MIE);
+
+        let (privilege, _) = csrs.enter_trap(
+            Trap::Interrupt(Interrupt::MachineTimer),
+            0x100,
+            PrivilegeMode::Machine,
+        );
+        assert_eq!(privilege, PrivilegeMode::Machine);
+
+        let saved_mepc = csrs.read(CsrAddress::Mepc);
+        let saved_mstatus = csrs.read(CsrAddress::Mstatus);
+
+        csrs.write(CsrAddress::Mstatus, saved_mstatus | super::MSTATUS_MIE);
+
+        let (privilege, _) = csrs.enter_trap(
+            Trap::Interrupt(Interrupt::MachineSoftware),
+            0x200,
+            PrivilegeMode::Machine,
+        );
+        assert_eq!(privilege, PrivilegeMode::Machine);
+
+        let (inner_privilege, inner_pc) = csrs.return_from_machine_trap();
+        assert_eq!(inner_privilege, PrivilegeMode::Machine);
+        assert_eq!(inner_pc, 0x200);
+
+        csrs.write(CsrAddress::Mepc, saved_mepc);
+        csrs.write(CsrAddress::Mstatus, saved_mstatus);
+
+        let (outer_privilege, outer_pc) = csrs.return_from_machine_trap();
+        assert_eq!(outer_privilege, PrivilegeMode::Machine);
+        assert_eq!(outer_pc, 0x100);
+    }
+
+    #[test]
+    fn supervisor_nested_return_can_resume_same_mode_when_software_restores_saved_state() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mideleg, (1 << 1) | (1 << 5));
+        csrs.write(CsrAddress::Sstatus, super::MSTATUS_SIE);
+
+        let (privilege, _) = csrs.enter_trap(
+            Trap::Interrupt(Interrupt::SupervisorTimer),
+            0x300,
+            PrivilegeMode::Supervisor,
+        );
+        assert_eq!(privilege, PrivilegeMode::Supervisor);
+
+        let saved_sepc = csrs.read(CsrAddress::Sepc);
+        let saved_sstatus = csrs.read(CsrAddress::Sstatus);
+
+        csrs.write(CsrAddress::Sstatus, saved_sstatus | super::MSTATUS_SIE);
+
+        let (privilege, _) = csrs.enter_trap(
+            Trap::Interrupt(Interrupt::SupervisorSoftware),
+            0x340,
+            PrivilegeMode::Supervisor,
+        );
+        assert_eq!(privilege, PrivilegeMode::Supervisor);
+
+        let (inner_privilege, inner_pc) = csrs.return_from_supervisor_trap();
+        assert_eq!(inner_privilege, PrivilegeMode::Supervisor);
+        assert_eq!(inner_pc, 0x340);
+
+        csrs.write(CsrAddress::Sepc, saved_sepc);
+        csrs.write(CsrAddress::Sstatus, saved_sstatus);
+
+        let (outer_privilege, outer_pc) = csrs.return_from_supervisor_trap();
+        assert_eq!(outer_privilege, PrivilegeMode::Supervisor);
+        assert_eq!(outer_pc, 0x300);
     }
 
     #[test]
