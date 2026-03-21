@@ -2149,6 +2149,97 @@ mod tests {
     }
 
     #[test]
+    fn takes_delegated_supervisor_external_interrupt_from_controller_device() {
+        const CONTROLLER_BASE: u64 = 0x4000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Rom::from_words(
+                0,
+                &[
+                    encode_addi(1, 0, 5),
+                    encode_jal(0, 0),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    encode_lui(2, 0x40000),
+                    encode_lw(3, 2, 12),
+                    encode_sw(3, 2, 12),
+                    encode_addi(10, 0, 5),
+                    encode_sret(),
+                    encode_jal(0, 0),
+                ],
+            ))
+            .expect("rom should map");
+        memory
+            .map_device(InterruptController::new(CONTROLLER_BASE))
+            .expect("controller should map");
+
+        let mut machine = Machine::new(PipelineCore::new(0), memory);
+        machine
+            .bus_mut()
+            .store32(CONTROLLER_BASE + 4, 1)
+            .expect("enable register should write");
+        machine
+            .bus_mut()
+            .store32(CONTROLLER_BASE + 16, 1)
+            .expect("route register should write");
+        machine
+            .bus_mut()
+            .store32(CONTROLLER_BASE + 8, 1)
+            .expect("set-pending register should write");
+        machine.cpu_mut().hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mideleg, 1 << 9);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sie, 1 << 9);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x20);
+
+        for _ in 0..16 {
+            machine
+                .step_cycle()
+                .expect("pipeline supervisor external interrupt cycle should work");
+        }
+
+        assert_eq!(machine.cpu().hart_state().registers.read(1), 5);
+        assert_eq!(machine.cpu().hart_state().registers.read(10), 5);
+        assert_eq!(
+            machine.cpu().hart_state().privilege,
+            crate::state::PrivilegeMode::User
+        );
+        assert_eq!(
+            machine
+                .cpu()
+                .hart_state()
+                .csrs
+                .read(rvsim_isa::CsrAddress::Scause),
+            (1_u32 << 31) | 9
+        );
+        assert_eq!(
+            machine
+                .bus_mut()
+                .load32(CONTROLLER_BASE)
+                .expect("pending register should read"),
+            0
+        );
+        assert_eq!(machine.cpu().stats().trap_count, 1);
+        assert_eq!(machine.cpu().stats().trap_flushes, 1);
+    }
+
+    #[test]
     fn takes_machine_software_interrupt_from_msip_device() {
         const MSIP_BASE: u64 = 0x5000_0000;
 

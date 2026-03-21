@@ -4,6 +4,37 @@ const PENDING_OFFSET: Address = 0;
 const ENABLE_OFFSET: Address = 4;
 const SET_PENDING_OFFSET: Address = 8;
 const CLAIM_COMPLETE_OFFSET: Address = 12;
+const ROUTE_OFFSET: Address = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptRoute {
+    MachineExternal,
+    SupervisorExternal,
+}
+
+impl InterruptRoute {
+    const fn from_register(value: u32) -> Self {
+        if (value & 1) != 0 {
+            Self::SupervisorExternal
+        } else {
+            Self::MachineExternal
+        }
+    }
+
+    const fn register_bits(self) -> u32 {
+        match self {
+            Self::MachineExternal => 0,
+            Self::SupervisorExternal => 1,
+        }
+    }
+
+    const fn interrupt_line(self) -> InterruptLine {
+        match self {
+            Self::MachineExternal => InterruptLine::MachineExternal,
+            Self::SupervisorExternal => InterruptLine::SupervisorExternal,
+        }
+    }
+}
 
 /// A minimal external interrupt controller with 32 software-visible sources.
 ///
@@ -16,6 +47,7 @@ pub struct InterruptController {
     pending: u32,
     enable: u32,
     claimed: u32,
+    route: InterruptRoute,
     claim_latch: Option<u32>,
     complete_staging: [u8; 4],
 }
@@ -24,10 +56,11 @@ impl InterruptController {
     #[must_use]
     pub fn new(base: Address) -> Self {
         Self {
-            range: AddressRange::new(base, 16),
+            range: AddressRange::new(base, 20),
             pending: 0,
             enable: 0,
             claimed: 0,
+            route: InterruptRoute::MachineExternal,
             claim_latch: None,
             complete_staging: [0; 4],
         }
@@ -84,6 +117,7 @@ impl InterruptController {
             CLAIM_COMPLETE_OFFSET..=15 => {
                 (self.claim_latch.unwrap_or_default(), (offset - 12) as usize)
             }
+            ROUTE_OFFSET..=19 => (self.route.register_bits(), (offset - 16) as usize),
             _ => (0, 0),
         };
 
@@ -104,13 +138,14 @@ impl Addressable for InterruptController {
         self.pending = 0;
         self.enable = 0;
         self.claimed = 0;
+        self.route = InterruptRoute::MachineExternal;
         self.claim_latch = None;
         self.complete_staging = [0; 4];
     }
 
     fn pending_interrupts(&self) -> InterruptSet {
         if self.enabled_pending() != 0 {
-            InterruptSet::from(InterruptLine::MachineExternal)
+            InterruptSet::from(self.route.interrupt_line())
         } else {
             InterruptSet::empty()
         }
@@ -154,6 +189,12 @@ impl Addressable for InterruptController {
                     self.complete_source(source_id);
                     self.complete_staging = [0; 4];
                 }
+                Ok(())
+            }
+            ROUTE_OFFSET..=19 => {
+                let mut bytes = self.route.register_bits().to_le_bytes();
+                bytes[(offset - 16) as usize] = value;
+                self.route = InterruptRoute::from_register(u32::from_le_bytes(bytes));
                 Ok(())
             }
             _ => Err(BusError::UnmappedAddress { addr }),
@@ -220,6 +261,30 @@ mod tests {
             controller.pending_interrupt(),
             Some(InterruptLine::MachineExternal)
         );
+    }
+
+    #[test]
+    fn route_register_can_raise_supervisor_external_interrupts() {
+        let mut controller = InterruptController::new(CONTROLLER_BASE);
+
+        write_u32(&mut controller, CONTROLLER_BASE + 4, 0b0001);
+        write_u32(&mut controller, CONTROLLER_BASE + 16, 1);
+        write_u32(&mut controller, CONTROLLER_BASE + 8, 0b0001);
+
+        assert_eq!(read_u32(&mut controller, CONTROLLER_BASE + 16), 1);
+        assert_eq!(
+            controller.pending_interrupt(),
+            Some(InterruptLine::SupervisorExternal)
+        );
+    }
+
+    #[test]
+    fn route_register_masks_reserved_bits() {
+        let mut controller = InterruptController::new(CONTROLLER_BASE);
+
+        write_u32(&mut controller, CONTROLLER_BASE + 16, u32::MAX);
+
+        assert_eq!(read_u32(&mut controller, CONTROLLER_BASE + 16), 1);
     }
 
     #[test]

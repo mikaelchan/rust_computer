@@ -71,7 +71,7 @@ The current baseline already has:
   The bus and CPU now model supervisor software/timer/external interrupt lines, privilege-aware interrupt arbitration through `mideleg`, `mie/mip`, `sie/sip`, and `mstatus`/`sstatus`, plus end-to-end supervisor software-interrupt handling in both CPU models.
 
 - [ ] Extend privilege support beyond the first supervisor slice.
-  Supervisor trap/interrupt state, `satp`-driven translation, machine-mode `MPRV` data accesses with `SUM`/`MXR` coverage, and supervisor gating through `mstatus.TVM`/`mstatus.TSR` are now in place. Fuller privileged CSR semantics, richer supervisor-capable external devices, and nested interrupt behavior remain future work.
+  Supervisor trap/interrupt state, `satp`-driven translation, machine-mode `MPRV` data accesses with `SUM`/`MXR` coverage, supervisor-routable external interrupt delivery, and supervisor gating through `mstatus.TVM`/`mstatus.TSR` are now in place. Fuller privileged CSR semantics, additional supervisor-capable devices, and nested interrupt behavior remain future work.
 
 - [x] Add the first virtual-memory slice.
   The CPU now performs `Sv32` instruction and data address translation from `satp`, walks page tables across cycles, and raises instruction/load/store page faults through the existing trap machinery in both CPU models.
