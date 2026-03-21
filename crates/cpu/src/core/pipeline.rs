@@ -550,13 +550,15 @@ fn is_translation_barrier_payload(
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
     use rvsim_devices::{
-        InterruptController, LatencyAdapter, MachineSoftwareInterrupt, MachineTimer, Ram, Rom,
-        SupervisorSoftwareInterrupt,
+        DmaController, InterruptController, LatencyAdapter, MachineSoftwareInterrupt, MachineTimer,
+        Ram, Rom, SupervisorSoftwareInterrupt,
     };
     use rvsim_system::{
-        AddressRange, Bus, BusError, CacheConfig, Machine, MemoryMap, Processor, SplitL1Cache,
-        StoreAllocationPolicy, WritePolicy,
+        AddressRange, ArbiterBus, Bus, BusError, CacheConfig, Machine, MemoryMap, Processor,
+        SplitL1Cache, StoreAllocationPolicy, WritePolicy,
     };
 
     use super::PipelineCore;
@@ -2234,6 +2236,168 @@ mod tests {
                 .load32(CONTROLLER_BASE)
                 .expect("pending register should read"),
             0
+        );
+        assert_eq!(machine.cpu().stats().trap_count, 1);
+        assert_eq!(machine.cpu().stats().trap_flushes, 1);
+    }
+
+    #[test]
+    fn takes_delegated_supervisor_external_interrupt_from_dma_completion() {
+        const RAM_BASE: u64 = 0x1000_0000;
+        const DMA_BASE: u64 = 0x7000_0000;
+
+        let dma = Rc::new(RefCell::new(DmaController::new(DMA_BASE)));
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Ram::new(0, 0x100))
+            .expect("program ram should map");
+        memory
+            .map_device(Ram::new(RAM_BASE, 0x100))
+            .expect("ram should map");
+        memory
+            .map_shared_device(Rc::clone(&dma))
+            .expect("dma should map");
+
+        let mut bus = ArbiterBus::new(memory);
+        bus.add_shared_master(Rc::clone(&dma));
+        bus.store32(RAM_BASE, 0x1122_3344)
+            .expect("source word 0 should write");
+        bus.store32(RAM_BASE + 4, 0x5566_7788)
+            .expect("source word 1 should write");
+        let mut machine = Machine::new(PipelineCore::new(0), bus);
+        machine.cpu_mut().hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mideleg, 1 << 9);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sie, 1 << 9);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x20);
+
+        for (index, instruction) in [
+            encode_addi(1, 0, 5),
+            encode_jal(0, 0),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            encode_lui(2, 0x70000),
+            encode_addi(3, 0, 12),
+            encode_sw(3, 2, 12),
+            encode_addi(10, 0, 6),
+            encode_sret(),
+            encode_jal(0, 0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            machine
+                .bus_mut()
+                .store32((index as u64) * 4, instruction)
+                .expect("program word should write");
+        }
+
+        for _ in 0..5 {
+            machine
+                .step_cycle()
+                .expect("pipeline warmup cycle should work");
+        }
+
+        machine
+            .bus_mut()
+            .store32(DMA_BASE + DmaController::SOURCE_OFFSET, RAM_BASE as u32)
+            .expect("dma source should program");
+        machine
+            .bus_mut()
+            .store32(
+                DMA_BASE + DmaController::DESTINATION_OFFSET,
+                (RAM_BASE + 0x40) as u32,
+            )
+            .expect("dma destination should program");
+        machine
+            .bus_mut()
+            .store32(DMA_BASE + DmaController::LENGTH_OFFSET, 2)
+            .expect("dma length should program");
+        machine
+            .bus_mut()
+            .store32(DMA_BASE + DmaController::ROUTE_OFFSET, 1)
+            .expect("dma route should program");
+        machine
+            .bus_mut()
+            .store32(
+                DMA_BASE + DmaController::CONTROL_OFFSET,
+                DmaController::CONTROL_START | DmaController::CONTROL_IRQ_ENABLE,
+            )
+            .expect("dma control should start transfer");
+
+        for _ in 0..48 {
+            machine
+                .step_cycle()
+                .expect("pipeline supervisor dma interrupt cycle should work");
+            if machine.cpu().hart_state().registers.read(10) == 6
+                && matches!(
+                    machine.cpu().hart_state().privilege,
+                    crate::state::PrivilegeMode::User
+                )
+                && machine
+                    .bus_mut()
+                    .pending_interrupts()
+                    .highest_priority()
+                    .is_none()
+            {
+                break;
+            }
+        }
+
+        assert_eq!(machine.cpu().hart_state().registers.read(1), 5);
+        assert_eq!(machine.cpu().hart_state().registers.read(10), 6);
+        assert_eq!(
+            machine.cpu().hart_state().privilege,
+            crate::state::PrivilegeMode::User
+        );
+        assert_eq!(
+            machine
+                .cpu()
+                .hart_state()
+                .csrs
+                .read(rvsim_isa::CsrAddress::Scause),
+            (1_u32 << 31) | 9
+        );
+        assert_eq!(
+            machine
+                .bus_mut()
+                .load32(DMA_BASE + DmaController::CONTROL_OFFSET)
+                .expect("dma control should read")
+                & DmaController::STATUS_DONE,
+            0
+        );
+        assert_eq!(
+            machine.bus_mut().pending_interrupts().highest_priority(),
+            None
+        );
+        assert_eq!(
+            machine
+                .bus_mut()
+                .load32(RAM_BASE + 0x40)
+                .expect("copied word 0 should read"),
+            0x1122_3344
+        );
+        assert_eq!(
+            machine
+                .bus_mut()
+                .load32(RAM_BASE + 0x44)
+                .expect("copied word 1 should read"),
+            0x5566_7788
         );
         assert_eq!(machine.cpu().stats().trap_count, 1);
         assert_eq!(machine.cpu().stats().trap_flushes, 1);

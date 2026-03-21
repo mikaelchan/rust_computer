@@ -5,6 +5,36 @@ use rvsim_system::{
     InterruptLine, InterruptSet,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptRoute {
+    MachineExternal,
+    SupervisorExternal,
+}
+
+impl InterruptRoute {
+    const fn from_register(value: u32) -> Self {
+        if (value & 1) != 0 {
+            Self::SupervisorExternal
+        } else {
+            Self::MachineExternal
+        }
+    }
+
+    const fn register_bits(self) -> u32 {
+        match self {
+            Self::MachineExternal => 0,
+            Self::SupervisorExternal => 1,
+        }
+    }
+
+    const fn interrupt_line(self) -> InterruptLine {
+        match self {
+            Self::MachineExternal => InterruptLine::MachineExternal,
+            Self::SupervisorExternal => InterruptLine::SupervisorExternal,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingWriteBurst {
     destination: Address,
@@ -52,6 +82,7 @@ pub struct DmaController {
     irq_enabled: bool,
     done: bool,
     error: bool,
+    interrupt_route: InterruptRoute,
     active: Option<ActiveTransfer>,
 }
 
@@ -64,6 +95,7 @@ impl DmaController {
     pub const LENGTH_OFFSET: Address = 8;
     pub const CONTROL_OFFSET: Address = 12;
     pub const TRANSFERRED_OFFSET: Address = 16;
+    pub const ROUTE_OFFSET: Address = 20;
 
     pub const CONTROL_START: u32 = 1 << 0;
     pub const STATUS_BUSY: u32 = 1 << 1;
@@ -74,7 +106,7 @@ impl DmaController {
     #[must_use]
     pub fn new(base: Address) -> Self {
         Self {
-            range: AddressRange::new(base, 20),
+            range: AddressRange::new(base, 24),
             source: 0,
             destination: 0,
             length_words: 0,
@@ -82,6 +114,7 @@ impl DmaController {
             irq_enabled: false,
             done: false,
             error: false,
+            interrupt_route: InterruptRoute::MachineExternal,
             active: None,
         }
     }
@@ -133,6 +166,7 @@ impl DmaController {
             Self::LENGTH_OFFSET => Ok(self.length_words),
             Self::CONTROL_OFFSET => Ok(self.control_word()),
             Self::TRANSFERRED_OFFSET => Ok(self.transferred_words),
+            Self::ROUTE_OFFSET => Ok(self.interrupt_route.register_bits()),
             _ => Err(BusError::UnmappedAddress {
                 addr: self.range.start + offset,
             }),
@@ -203,12 +237,13 @@ impl Addressable for DmaController {
         self.irq_enabled = false;
         self.done = false;
         self.error = false;
+        self.interrupt_route = InterruptRoute::MachineExternal;
         self.active = None;
     }
 
     fn pending_interrupts(&self) -> InterruptSet {
         if self.irq_enabled && (self.done || self.error) {
-            InterruptSet::from(InterruptLine::MachineExternal)
+            InterruptSet::from(self.interrupt_route.interrupt_line())
         } else {
             InterruptSet::empty()
         }
@@ -237,6 +272,11 @@ impl Addressable for DmaController {
                 }
             }
             Self::TRANSFERRED_OFFSET => return Err(BusError::ReadOnlyAddress { addr }),
+            Self::ROUTE_OFFSET => {
+                let mut route = self.interrupt_route.register_bits();
+                Self::write_u32_byte(&mut route, byte_index, value);
+                self.interrupt_route = InterruptRoute::from_register(route);
+            }
             _ => return Err(BusError::UnmappedAddress { addr }),
         }
 
@@ -368,8 +408,9 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use rvsim_system::{
-        AddressRange, ArbiterBus, Bus, BusError, CacheConfig, CacheMaintenance, DirectMappedCache,
-        InterruptLine, MemoryMap, SplitL1Cache, StoreAllocationPolicy, WritePolicy,
+        AddressRange, Addressable, ArbiterBus, Bus, BusError, CacheConfig, CacheMaintenance,
+        DirectMappedCache, InterruptLine, MemoryMap, SplitL1Cache, StoreAllocationPolicy,
+        WritePolicy,
     };
 
     use crate::{LatencyAdapter, Ram};
@@ -491,6 +532,54 @@ mod tests {
     }
 
     #[test]
+    fn completion_interrupt_can_route_to_supervisor_external() {
+        let dma = Rc::new(RefCell::new(DmaController::new(DMA_BASE)));
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Ram::new(RAM_BASE, 0x100))
+            .expect("RAM should map");
+        memory
+            .map_shared_device(Rc::clone(&dma))
+            .expect("DMA should map");
+
+        let mut bus = ArbiterBus::new(memory);
+        bus.add_shared_master(Rc::clone(&dma));
+
+        bus.store32(RAM_BASE, 0x1122_3344)
+            .expect("source word should write");
+        bus.store32(DMA_BASE + DmaController::SOURCE_OFFSET, RAM_BASE as u32)
+            .expect("DMA source should program");
+        bus.store32(
+            DMA_BASE + DmaController::DESTINATION_OFFSET,
+            (RAM_BASE + 0x40) as u32,
+        )
+        .expect("DMA destination should program");
+        bus.store32(DMA_BASE + DmaController::LENGTH_OFFSET, 1)
+            .expect("DMA length should program");
+        bus.store32(DMA_BASE + DmaController::ROUTE_OFFSET, 1)
+            .expect("DMA route should program");
+        bus.store32(
+            DMA_BASE + DmaController::CONTROL_OFFSET,
+            DmaController::CONTROL_START | DmaController::CONTROL_IRQ_ENABLE,
+        )
+        .expect("DMA control should start transfer");
+
+        for _ in 0..16 {
+            bus.tick();
+            if dma.borrow().is_done() {
+                break;
+            }
+        }
+        bus.tick();
+
+        assert!(dma.borrow().is_done(), "{:?}", dma.borrow());
+        assert_eq!(
+            bus.pending_interrupts().highest_priority(),
+            Some(InterruptLine::SupervisorExternal)
+        );
+    }
+
+    #[test]
     fn latches_error_for_bad_source_address() {
         let dma = Rc::new(RefCell::new(DmaController::new(DMA_BASE)));
         let mut memory = MemoryMap::new();
@@ -539,6 +628,25 @@ mod tests {
                 & DmaController::STATUS_ERROR,
             DmaController::STATUS_ERROR
         );
+    }
+
+    #[test]
+    fn route_register_masks_reserved_bits() {
+        let mut dma = DmaController::new(DMA_BASE);
+
+        for (offset, byte) in u32::MAX.to_le_bytes().into_iter().enumerate() {
+            dma.store8(DMA_BASE + DmaController::ROUTE_OFFSET + offset as u64, byte)
+                .expect("dma route byte should write");
+        }
+
+        let mut bytes = [0; 4];
+        for (offset, byte) in bytes.iter_mut().enumerate() {
+            *byte = dma
+                .load8(DMA_BASE + DmaController::ROUTE_OFFSET + offset as u64)
+                .expect("dma route byte should read");
+        }
+
+        assert_eq!(u32::from_le_bytes(bytes), 1);
     }
 
     #[test]
