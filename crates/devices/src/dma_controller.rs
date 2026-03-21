@@ -367,7 +367,10 @@ impl BusMaster for DmaController {
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
-    use rvsim_system::{ArbiterBus, Bus, BusError, InterruptLine, MemoryMap};
+    use rvsim_system::{
+        AddressRange, ArbiterBus, Bus, BusError, CacheConfig, CacheMaintenance, DirectMappedCache,
+        InterruptLine, MemoryMap, SplitL1Cache, StoreAllocationPolicy, WritePolicy,
+    };
 
     use crate::{LatencyAdapter, Ram};
 
@@ -376,7 +379,10 @@ mod tests {
     const RAM_BASE: u64 = 0x1000_0000;
     const DMA_BASE: u64 = 0x4000_0000;
 
-    fn blocking_store32(bus: &mut ArbiterBus<MemoryMap>, addr: u64, value: u32) {
+    fn blocking_store32<B>(bus: &mut B, addr: u64, value: u32)
+    where
+        B: Bus,
+    {
         loop {
             match bus.store32(addr, value) {
                 Ok(()) => return,
@@ -386,12 +392,41 @@ mod tests {
         }
     }
 
-    fn blocking_load32(bus: &mut ArbiterBus<MemoryMap>, addr: u64) -> u32 {
+    fn blocking_load32<B>(bus: &mut B, addr: u64) -> u32
+    where
+        B: Bus,
+    {
         loop {
             match bus.load32(addr) {
                 Ok(value) => return value,
                 Err(BusError::Busy { .. }) => bus.tick(),
                 Err(error) => panic!("load32 at 0x{addr:08x} failed: {error:?}"),
+            }
+        }
+    }
+
+    fn blocking_write_back_range<B>(bus: &mut B, start: u64, len: u64)
+    where
+        B: Bus + CacheMaintenance,
+    {
+        loop {
+            match bus.write_back_range(start, len) {
+                Ok(()) => return,
+                Err(BusError::Busy { .. }) => bus.tick(),
+                Err(error) => panic!("write_back_range failed: {error:?}"),
+            }
+        }
+    }
+
+    fn blocking_invalidate_range<B>(bus: &mut B, start: u64, len: u64)
+    where
+        B: Bus + CacheMaintenance,
+    {
+        loop {
+            match bus.invalidate_range(start, len) {
+                Ok(()) => return,
+                Err(BusError::Busy { .. }) => bus.tick(),
+                Err(error) => panic!("invalidate_range failed: {error:?}"),
             }
         }
     }
@@ -625,6 +660,108 @@ mod tests {
             assert_eq!(
                 blocking_load32(&mut bus, RAM_BASE + 0x100 + (index as u64 * 4)),
                 0x1000_0000 + index as u32
+            );
+        }
+    }
+
+    #[test]
+    fn cache_maintenance_makes_cached_dma_buffers_visible() {
+        let dma = Rc::new(RefCell::new(DmaController::new(DMA_BASE)));
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(LatencyAdapter::new(Ram::new(RAM_BASE, 0x400), 2))
+            .expect("RAM should map");
+        memory
+            .map_shared_device(Rc::clone(&dma))
+            .expect("DMA should map");
+
+        let mut fabric = ArbiterBus::new(memory);
+        fabric.add_shared_master(Rc::clone(&dma));
+
+        let l2 = DirectMappedCache::new(
+            fabric,
+            CacheConfig::new(16, vec![AddressRange::new(RAM_BASE, 0x400)])
+                .with_line_size(16)
+                .with_write_policy(WritePolicy::WriteBack)
+                .with_store_allocation_policy(StoreAllocationPolicy::WriteAllocate),
+        );
+        let mut bus = SplitL1Cache::new(
+            l2,
+            CacheConfig::new(8, vec![]),
+            CacheConfig::new(8, vec![AddressRange::new(RAM_BASE, 0x400)])
+                .with_line_size(16)
+                .with_write_policy(WritePolicy::WriteBack)
+                .with_store_allocation_policy(StoreAllocationPolicy::WriteAllocate),
+        );
+
+        let source = RAM_BASE + 0x40;
+        let destination = RAM_BASE + 0x80;
+        for (index, word) in [0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444]
+            .into_iter()
+            .enumerate()
+        {
+            blocking_store32(&mut bus, source + (index as u64 * 4), word);
+        }
+
+        for index in 0..4 {
+            let source_word = {
+                let memory = bus.inner_mut().inner_mut().inner_mut();
+                blocking_load32(memory, source + (index as u64 * 4))
+            };
+            assert_eq!(source_word, 0);
+            assert_eq!(
+                blocking_load32(&mut bus, destination + (index as u64 * 4)),
+                0
+            );
+        }
+
+        blocking_write_back_range(&mut bus, source, 16);
+
+        for (index, word) in [0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444]
+            .into_iter()
+            .enumerate()
+        {
+            let source_word = {
+                let memory = bus.inner_mut().inner_mut().inner_mut();
+                blocking_load32(memory, source + (index as u64 * 4))
+            };
+            assert_eq!(source_word, word);
+        }
+
+        blocking_store32(
+            &mut bus,
+            DMA_BASE + DmaController::SOURCE_OFFSET,
+            source as u32,
+        );
+        blocking_store32(
+            &mut bus,
+            DMA_BASE + DmaController::DESTINATION_OFFSET,
+            destination as u32,
+        );
+        blocking_store32(&mut bus, DMA_BASE + DmaController::LENGTH_OFFSET, 4);
+        blocking_store32(
+            &mut bus,
+            DMA_BASE + DmaController::CONTROL_OFFSET,
+            DmaController::CONTROL_START,
+        );
+
+        for _ in 0..64 {
+            bus.tick();
+            if dma.borrow().is_done() {
+                break;
+            }
+        }
+
+        assert!(dma.borrow().is_done(), "{:?}", dma.borrow());
+        blocking_invalidate_range(&mut bus, destination, 16);
+
+        for (index, word) in [0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                blocking_load32(&mut bus, destination + (index as u64 * 4)),
+                word
             );
         }
     }

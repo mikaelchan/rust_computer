@@ -15,8 +15,8 @@ pub use bus::{
     InterruptSet, TransactionBus, TransactionPhase, TransactionRequest, TransactionResponse,
 };
 pub use cache::{
-    CacheConfig, CacheStats, DirectMappedCache, ReplacementPolicy, SplitCacheStats, SplitL1Cache,
-    StoreAllocationPolicy, WritePolicy,
+    CacheConfig, CacheMaintenance, CacheStats, DirectMappedCache, ReplacementPolicy,
+    SplitCacheStats, SplitL1Cache, StoreAllocationPolicy, WritePolicy,
 };
 pub use clock::Clock;
 pub use component::{CpuCycle, Processor, SimComponent};

@@ -154,7 +154,7 @@ Use these policy combinations depending on what you want to learn:
 - dirty data traffic studies:
   use `write-back + write-allocate`
 - MMIO or DMA-safe regions:
-  keep them uncached for now
+  either keep them uncached or pair cached buffers with explicit cache maintenance
 - sequential locality studies:
   increase line size and keep addresses within one DRAM row
 - associativity studies:
@@ -165,7 +165,7 @@ Use these policy combinations depending on what you want to learn:
 A few important caveats matter for experiments:
 
 - DMA is not coherent with caches yet.
-  Keep DMA buffers in uncached regions unless you explicitly want to study bypass behavior.
+  If you place DMA buffers in cached regions, issue `write_back_range` before DMA reads them and `invalidate_range` before the CPU consumes DMA-written data.
 - Cacheable ranges must align to cache-line boundaries.
   Partial-line cacheable windows are rejected at construction time.
 - The bus is still single-progress at the lower level.
@@ -181,4 +181,4 @@ A good default workflow for new memory experiments is:
 2. Change one variable at a time in [microbench.rs](/Users/michael/Workspace/rust_computer/apps/computer/src/microbench.rs): line size, associativity, write policy, store-allocation policy, or DRAM timing.
 3. Re-run the benchmark and compare both stall cycles and cache traffic counters.
 4. If the change is intended to preserve behavior, run `cargo test` and `cargo test -p rvsim-cpu --test program_suite`.
-5. If the change touches DMA-visible memory, verify that the region remains uncached or document the coherence assumption explicitly.
+5. If the change touches DMA-visible memory, verify that the region is either uncached or paired with explicit cache maintenance, and document that assumption.

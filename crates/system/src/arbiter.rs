@@ -4,7 +4,8 @@ use std::{cell::RefCell, fmt, rc::Rc};
 
 use crate::{
     BurstBus, BurstPhase, BurstRequest, BurstResponse, Bus, BusError, BusMaster, BusMasterRequest,
-    BusMasterResponse, InterruptSet, TransactionBus, TransactionRequest, TransactionResponse,
+    BusMasterResponse, CacheMaintenance, InterruptSet, TransactionBus, TransactionRequest,
+    TransactionResponse,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -436,6 +437,19 @@ where
 
     fn take_burst_response(&mut self, id: u64) -> Option<Result<BurstResponse, BusError>> {
         self.inner.take_burst_response(id)
+    }
+}
+
+impl<B> CacheMaintenance for ArbiterBus<B>
+where
+    B: TransactionBus + BurstBus + CacheMaintenance,
+{
+    fn write_back_range(&mut self, start: crate::Address, len: u64) -> Result<(), BusError> {
+        self.inner.write_back_range(start, len)
+    }
+
+    fn invalidate_range(&mut self, start: crate::Address, len: u64) -> Result<(), BusError> {
+        self.inner.invalidate_range(start, len)
     }
 }
 

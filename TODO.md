@@ -56,8 +56,8 @@ The current baseline already has:
 - [x] Add a DMA-capable external device.
   A simple MMIO-programmable DMA engine now issues memory-to-memory transfers through the shared arbiter and can raise a machine external interrupt on completion or fault.
 
-- [ ] Add cache maintenance or coherent DMA behavior.
-  The current DMA path intentionally uses non-cacheable buffers; future work should model either software-managed cache maintenance or hardware coherence.
+- [x] Add cache maintenance or coherent DMA behavior.
+  Cache wrappers now expose software-managed `write_back_range` and `invalidate_range` hooks that recurse through the cache hierarchy, so cached DMA buffers can be synchronized explicitly even though the DMA path is still non-coherent.
 
 - [ ] Expand MMIO device coverage.
   Good candidates: block device, display/framebuffer, keyboard/input source, programmable timer variants, and storage-oriented test devices.

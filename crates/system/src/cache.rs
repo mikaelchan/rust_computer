@@ -1,5 +1,7 @@
 //! Cache wrappers that sit in front of a backing bus.
 
+use std::collections::VecDeque;
+
 use crate::{
     AccessKind, Address, AddressRange, BurstBus, BurstPhase, BurstRequest, BurstResponse, Bus,
     BusError, InterruptSet,
@@ -192,6 +194,17 @@ pub struct CacheStats {
 pub struct SplitCacheStats {
     pub instruction: CacheStats,
     pub data: CacheStats,
+}
+
+/// Software-managed cache maintenance hooks for DMA and self-modifying-code experiments.
+pub trait CacheMaintenance {
+    fn write_back_range(&mut self, start: Address, len: u64) -> Result<(), BusError>;
+    fn invalidate_range(&mut self, start: Address, len: u64) -> Result<(), BusError>;
+
+    fn write_back_invalidate_range(&mut self, start: Address, len: u64) -> Result<(), BusError> {
+        self.write_back_range(start, len)?;
+        self.invalidate_range(start, len)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,6 +403,60 @@ enum CacheBeatAdvance {
     Failed(BusError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaintenanceKind {
+    WriteBack,
+    Invalidate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MaintenanceRequest {
+    start: Address,
+    len: u64,
+    kind: MaintenanceKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingBankWriteBack {
+    line_bases: VecDeque<Address>,
+    active_line_base: Option<Address>,
+    active_write_back: Option<PendingWriteBack>,
+}
+
+impl PendingBankWriteBack {
+    fn new(line_bases: VecDeque<Address>) -> Self {
+        Self {
+            line_bases,
+            active_line_base: None,
+            active_write_back: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DirectMaintenanceStage {
+    LocalWriteBack(PendingBankWriteBack),
+    Inner,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingDirectMaintenance {
+    request: MaintenanceRequest,
+    stage: DirectMaintenanceStage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SplitMaintenanceStage {
+    DataWriteBack(PendingBankWriteBack),
+    Inner,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingSplitMaintenance {
+    request: MaintenanceRequest,
+    stage: SplitMaintenanceStage,
+}
+
 #[derive(Debug, Clone)]
 struct CacheBank {
     config: CacheConfig,
@@ -448,6 +515,29 @@ impl CacheBank {
 
     fn line_base(&self, addr: Address) -> Address {
         addr & !((self.config.line_size as u64) - 1)
+    }
+
+    fn line_bases_for_range(&self, start: Address, len: u64) -> VecDeque<Address> {
+        let mut line_bases = VecDeque::new();
+        if len == 0 {
+            return line_bases;
+        }
+
+        let mut line_base = self.line_base(start);
+        let end = start.checked_add(len - 1).unwrap_or(u64::MAX);
+        loop {
+            line_bases.push_back(line_base);
+            if line_base >= end {
+                break;
+            }
+
+            let Some(next_line_base) = line_base.checked_add(self.config.line_size as u64) else {
+                break;
+            };
+            line_base = next_line_base;
+        }
+
+        line_bases
     }
 
     fn caches_line_containing(&self, addr: Address) -> bool {
@@ -857,12 +947,73 @@ impl CacheBank {
         }
     }
 
-    fn invalidate_line(&mut self, addr: Address) {
-        if !self.caches_address(addr) {
+    fn pending_write_back_for_line(&self, line_base: Address) -> Option<PendingWriteBack> {
+        if !self.caches_line(line_base) {
+            return None;
+        }
+
+        let decoded = self.decode(line_base);
+        let way_index = self.lookup_way(decoded)?;
+        let line = &self.sets[decoded.set_index].lines[way_index];
+        (line.valid && line.dirty).then(|| PendingWriteBack::new(line_base, &line.words))
+    }
+
+    fn complete_write_back_for_line(&mut self, line_base: Address) {
+        if !self.caches_line(line_base) {
             return;
         }
 
-        let decoded = self.decode(addr);
+        let decoded = self.decode(line_base);
+        let Some(way_index) = self.lookup_way(decoded) else {
+            return;
+        };
+
+        self.sets[decoded.set_index].lines[way_index].dirty = false;
+    }
+
+    fn continue_write_back_range<B>(
+        &mut self,
+        inner: &mut B,
+        pending: &mut PendingBankWriteBack,
+    ) -> Result<bool, BusError>
+    where
+        B: BurstBus,
+    {
+        loop {
+            if let Some(write_back) = &mut pending.active_write_back {
+                match self.progress_write_back(inner, write_back)? {
+                    BurstDrive::Busy { remaining_cycles } => {
+                        return Err(BusError::Busy { remaining_cycles });
+                    }
+                    BurstDrive::Ready(beats) => {
+                        self.stats.write_backs += 1;
+                        self.stats.write_back_words += beats as u64;
+                        if let Some(line_base) = pending.active_line_base.take() {
+                            self.complete_write_back_for_line(line_base);
+                        }
+                        pending.active_write_back = None;
+                    }
+                }
+                continue;
+            }
+
+            let Some(line_base) = pending.line_bases.pop_front() else {
+                return Ok(true);
+            };
+
+            if let Some(write_back) = self.pending_write_back_for_line(line_base) {
+                pending.active_line_base = Some(line_base);
+                pending.active_write_back = Some(write_back);
+            }
+        }
+    }
+
+    fn invalidate_line_base(&mut self, line_base: Address) {
+        if !self.caches_line(line_base) {
+            return;
+        }
+
+        let decoded = self.decode(line_base);
         if self
             .pending
             .as_ref()
@@ -882,6 +1033,16 @@ impl CacheBank {
             self.stats.invalidations += 1;
         }
     }
+
+    fn invalidate_range(&mut self, start: Address, len: u64) {
+        for line_base in self.line_bases_for_range(start, len) {
+            self.invalidate_line_base(line_base);
+        }
+    }
+
+    fn invalidate_line(&mut self, addr: Address) {
+        self.invalidate_line_base(self.line_base(addr));
+    }
 }
 
 /// A unified cache wrapper retained for compatibility with earlier milestones.
@@ -891,6 +1052,7 @@ pub struct DirectMappedCache<B> {
     bank: CacheBank,
     active_burst: Option<ActiveCacheBurst>,
     next_burst_id: u64,
+    maintenance: Option<PendingDirectMaintenance>,
 }
 
 impl<B> DirectMappedCache<B>
@@ -904,6 +1066,7 @@ where
             bank: CacheBank::new(config),
             active_burst: None,
             next_burst_id: 0,
+            maintenance: None,
         }
     }
 
@@ -947,7 +1110,10 @@ where
         let active_cycles = self.active_burst_remaining_cycles();
         if active_cycles != 0 {
             active_cycles
-        } else if self.bank.has_pending_activity() || self.inner.is_busy() {
+        } else if self.maintenance.is_some()
+            || self.bank.has_pending_activity()
+            || self.inner.is_busy()
+        {
             1
         } else {
             0
@@ -1029,12 +1195,98 @@ where
     }
 }
 
+impl<B> DirectMappedCache<B>
+where
+    B: BurstBus + CacheMaintenance,
+{
+    fn ensure_maintenance_request(&mut self, request: MaintenanceRequest) -> Result<(), BusError> {
+        if let Some(pending) = &self.maintenance {
+            if pending.request == request {
+                return Ok(());
+            }
+
+            return Err(BusError::Busy {
+                remaining_cycles: self.busy_remaining_cycles().max(1),
+            });
+        }
+
+        if self.active_burst.is_some() || self.bank.has_pending_activity() {
+            return Err(BusError::Busy {
+                remaining_cycles: self.busy_remaining_cycles().max(1),
+            });
+        }
+
+        let stage = match request.kind {
+            MaintenanceKind::WriteBack => {
+                DirectMaintenanceStage::LocalWriteBack(PendingBankWriteBack::new(
+                    self.bank.line_bases_for_range(request.start, request.len),
+                ))
+            }
+            MaintenanceKind::Invalidate => {
+                self.bank.invalidate_range(request.start, request.len);
+                DirectMaintenanceStage::Inner
+            }
+        };
+
+        self.maintenance = Some(PendingDirectMaintenance { request, stage });
+        Ok(())
+    }
+
+    fn continue_maintenance(&mut self) -> Result<(), BusError> {
+        let Some(mut pending) = self.maintenance.take() else {
+            return Ok(());
+        };
+
+        loop {
+            match &mut pending.stage {
+                DirectMaintenanceStage::LocalWriteBack(write_back) => {
+                    match self
+                        .bank
+                        .continue_write_back_range(&mut self.inner, write_back)
+                    {
+                        Ok(true) => {
+                            pending.stage = DirectMaintenanceStage::Inner;
+                        }
+                        Ok(false) => {
+                            unreachable!("bank write-back should either complete or block")
+                        }
+                        Err(error) => {
+                            self.maintenance = Some(pending);
+                            return Err(error);
+                        }
+                    }
+                }
+                DirectMaintenanceStage::Inner => {
+                    let result = match pending.request.kind {
+                        MaintenanceKind::WriteBack => self
+                            .inner
+                            .write_back_range(pending.request.start, pending.request.len),
+                        MaintenanceKind::Invalidate => self
+                            .inner
+                            .invalidate_range(pending.request.start, pending.request.len),
+                    };
+
+                    match result {
+                        Ok(()) => return Ok(()),
+                        Err(error @ BusError::Busy { .. }) => {
+                            self.maintenance = Some(pending);
+                            return Err(error);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A split L1 with independent instruction and data banks.
 #[derive(Debug)]
 pub struct SplitL1Cache<B> {
     inner: B,
     instruction: CacheBank,
     data: CacheBank,
+    maintenance: Option<PendingSplitMaintenance>,
 }
 
 impl<B> SplitL1Cache<B>
@@ -1047,6 +1299,7 @@ where
             inner,
             instruction: CacheBank::new(instruction),
             data: CacheBank::new(data),
+            maintenance: None,
         }
     }
 
@@ -1075,6 +1328,105 @@ where
     #[must_use]
     pub fn data_config(&self) -> &CacheConfig {
         self.data.config()
+    }
+}
+
+impl<B> SplitL1Cache<B>
+where
+    B: BurstBus + CacheMaintenance,
+{
+    fn maintenance_busy_cycles(&self) -> u32 {
+        if self.maintenance.is_some()
+            || self.instruction.has_pending_activity()
+            || self.data.has_pending_activity()
+            || self.inner.is_busy()
+        {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn ensure_maintenance_request(&mut self, request: MaintenanceRequest) -> Result<(), BusError> {
+        if let Some(pending) = &self.maintenance {
+            if pending.request == request {
+                return Ok(());
+            }
+
+            return Err(BusError::Busy {
+                remaining_cycles: self.maintenance_busy_cycles().max(1),
+            });
+        }
+
+        if self.instruction.has_pending_activity() || self.data.has_pending_activity() {
+            return Err(BusError::Busy {
+                remaining_cycles: self.maintenance_busy_cycles().max(1),
+            });
+        }
+
+        let stage = match request.kind {
+            MaintenanceKind::WriteBack => {
+                SplitMaintenanceStage::DataWriteBack(PendingBankWriteBack::new(
+                    self.data.line_bases_for_range(request.start, request.len),
+                ))
+            }
+            MaintenanceKind::Invalidate => {
+                self.data.invalidate_range(request.start, request.len);
+                self.instruction
+                    .invalidate_range(request.start, request.len);
+                SplitMaintenanceStage::Inner
+            }
+        };
+
+        self.maintenance = Some(PendingSplitMaintenance { request, stage });
+        Ok(())
+    }
+
+    fn continue_maintenance(&mut self) -> Result<(), BusError> {
+        let Some(mut pending) = self.maintenance.take() else {
+            return Ok(());
+        };
+
+        loop {
+            match &mut pending.stage {
+                SplitMaintenanceStage::DataWriteBack(write_back) => {
+                    match self
+                        .data
+                        .continue_write_back_range(&mut self.inner, write_back)
+                    {
+                        Ok(true) => {
+                            pending.stage = SplitMaintenanceStage::Inner;
+                        }
+                        Ok(false) => {
+                            unreachable!("bank write-back should either complete or block")
+                        }
+                        Err(error) => {
+                            self.maintenance = Some(pending);
+                            return Err(error);
+                        }
+                    }
+                }
+                SplitMaintenanceStage::Inner => {
+                    let result = match pending.request.kind {
+                        MaintenanceKind::WriteBack => self
+                            .inner
+                            .write_back_range(pending.request.start, pending.request.len),
+                        MaintenanceKind::Invalidate => self
+                            .inner
+                            .invalidate_range(pending.request.start, pending.request.len),
+                    };
+
+                    match result {
+                        Ok(()) => return Ok(()),
+                        Err(error @ BusError::Busy { .. }) => {
+                            self.maintenance = Some(pending);
+                            return Err(error);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1112,10 +1464,16 @@ where
         self.bank.reset();
         self.active_burst = None;
         self.next_burst_id = 0;
+        self.maintenance = None;
         self.inner.reset();
     }
 
     fn fetch32(&mut self, addr: Address) -> Result<u32, BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: self.busy_remaining_cycles().max(1),
+            });
+        }
         if addr % 4 != 0 {
             return Err(BusError::MisalignedAccess { addr, width: 4 });
         }
@@ -1130,6 +1488,11 @@ where
     }
 
     fn load8(&mut self, addr: Address) -> Result<u8, BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: self.busy_remaining_cycles().max(1),
+            });
+        }
         if !self.bank.caches_address(addr) || !self.bank.caches_line_containing(addr) {
             self.bank.note_bypassed_read();
             return self.inner.load8(addr);
@@ -1139,6 +1502,11 @@ where
     }
 
     fn store8(&mut self, addr: Address, value: u8) -> Result<(), BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: self.busy_remaining_cycles().max(1),
+            });
+        }
         self.bank.store(
             &mut self.inner,
             StoreOp {
@@ -1150,6 +1518,11 @@ where
     }
 
     fn load16(&mut self, addr: Address) -> Result<u16, BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: self.busy_remaining_cycles().max(1),
+            });
+        }
         if addr % 2 != 0 {
             return Err(BusError::MisalignedAccess { addr, width: 2 });
         }
@@ -1166,6 +1539,11 @@ where
     }
 
     fn load32(&mut self, addr: Address) -> Result<u32, BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: self.busy_remaining_cycles().max(1),
+            });
+        }
         if addr % 4 != 0 {
             return Err(BusError::MisalignedAccess { addr, width: 4 });
         }
@@ -1179,6 +1557,11 @@ where
     }
 
     fn store16(&mut self, addr: Address, value: u16) -> Result<(), BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: self.busy_remaining_cycles().max(1),
+            });
+        }
         if addr % 2 != 0 {
             return Err(BusError::MisalignedAccess { addr, width: 2 });
         }
@@ -1194,6 +1577,11 @@ where
     }
 
     fn store32(&mut self, addr: Address, value: u32) -> Result<(), BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: self.busy_remaining_cycles().max(1),
+            });
+        }
         if addr % 4 != 0 {
             return Err(BusError::MisalignedAccess { addr, width: 4 });
         }
@@ -1214,7 +1602,10 @@ where
     }
 
     fn is_busy(&self) -> bool {
-        self.active_burst.is_some() || self.bank.has_pending_activity() || self.inner.is_busy()
+        self.maintenance.is_some()
+            || self.active_burst.is_some()
+            || self.bank.has_pending_activity()
+            || self.inner.is_busy()
     }
 
     fn pending_interrupts(&self) -> InterruptSet {
@@ -1227,7 +1618,11 @@ where
     B: BurstBus,
 {
     fn submit_burst(&mut self, request: BurstRequest) -> Result<u64, BusError> {
-        if self.active_burst.is_some() || self.bank.has_pending_activity() || self.inner.is_busy() {
+        if self.maintenance.is_some()
+            || self.active_burst.is_some()
+            || self.bank.has_pending_activity()
+            || self.inner.is_busy()
+        {
             return Err(BusError::Busy {
                 remaining_cycles: self.busy_remaining_cycles().max(1),
             });
@@ -1310,6 +1705,31 @@ where
     }
 }
 
+impl<B> CacheMaintenance for DirectMappedCache<B>
+where
+    B: BurstBus + CacheMaintenance,
+{
+    fn write_back_range(&mut self, start: Address, len: u64) -> Result<(), BusError> {
+        let request = MaintenanceRequest {
+            start,
+            len,
+            kind: MaintenanceKind::WriteBack,
+        };
+        self.ensure_maintenance_request(request)?;
+        self.continue_maintenance()
+    }
+
+    fn invalidate_range(&mut self, start: Address, len: u64) -> Result<(), BusError> {
+        let request = MaintenanceRequest {
+            start,
+            len,
+            kind: MaintenanceKind::Invalidate,
+        };
+        self.ensure_maintenance_request(request)?;
+        self.continue_maintenance()
+    }
+}
+
 impl<B> Bus for SplitL1Cache<B>
 where
     B: BurstBus,
@@ -1317,10 +1737,16 @@ where
     fn reset(&mut self) {
         self.instruction.reset();
         self.data.reset();
+        self.maintenance = None;
         self.inner.reset();
     }
 
     fn fetch32(&mut self, addr: Address) -> Result<u32, BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: 1,
+            });
+        }
         if addr % 4 != 0 {
             return Err(BusError::MisalignedAccess { addr, width: 4 });
         }
@@ -1336,6 +1762,11 @@ where
     }
 
     fn load8(&mut self, addr: Address) -> Result<u8, BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: 1,
+            });
+        }
         if !self.data.caches_address(addr) || !self.data.caches_line_containing(addr) {
             self.data.note_bypassed_read();
             return self.inner.load8(addr);
@@ -1345,6 +1776,11 @@ where
     }
 
     fn store8(&mut self, addr: Address, value: u8) -> Result<(), BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: 1,
+            });
+        }
         self.data.store(
             &mut self.inner,
             StoreOp {
@@ -1358,6 +1794,11 @@ where
     }
 
     fn load16(&mut self, addr: Address) -> Result<u16, BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: 1,
+            });
+        }
         if addr % 2 != 0 {
             return Err(BusError::MisalignedAccess { addr, width: 2 });
         }
@@ -1374,6 +1815,11 @@ where
     }
 
     fn load32(&mut self, addr: Address) -> Result<u32, BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: 1,
+            });
+        }
         if addr % 4 != 0 {
             return Err(BusError::MisalignedAccess { addr, width: 4 });
         }
@@ -1387,6 +1833,11 @@ where
     }
 
     fn store16(&mut self, addr: Address, value: u16) -> Result<(), BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: 1,
+            });
+        }
         if addr % 2 != 0 {
             return Err(BusError::MisalignedAccess { addr, width: 2 });
         }
@@ -1404,6 +1855,11 @@ where
     }
 
     fn store32(&mut self, addr: Address, value: u32) -> Result<(), BusError> {
+        if self.maintenance.is_some() {
+            return Err(BusError::Busy {
+                remaining_cycles: 1,
+            });
+        }
         if addr % 4 != 0 {
             return Err(BusError::MisalignedAccess { addr, width: 4 });
         }
@@ -1425,13 +1881,39 @@ where
     }
 
     fn is_busy(&self) -> bool {
-        self.instruction.has_pending_activity()
+        self.maintenance.is_some()
+            || self.instruction.has_pending_activity()
             || self.data.has_pending_activity()
             || self.inner.is_busy()
     }
 
     fn pending_interrupts(&self) -> InterruptSet {
         self.inner.pending_interrupts()
+    }
+}
+
+impl<B> CacheMaintenance for SplitL1Cache<B>
+where
+    B: BurstBus + CacheMaintenance,
+{
+    fn write_back_range(&mut self, start: Address, len: u64) -> Result<(), BusError> {
+        let request = MaintenanceRequest {
+            start,
+            len,
+            kind: MaintenanceKind::WriteBack,
+        };
+        self.ensure_maintenance_request(request)?;
+        self.continue_maintenance()
+    }
+
+    fn invalidate_range(&mut self, start: Address, len: u64) -> Result<(), BusError> {
+        let request = MaintenanceRequest {
+            start,
+            len,
+            kind: MaintenanceKind::Invalidate,
+        };
+        self.ensure_maintenance_request(request)?;
+        self.continue_maintenance()
     }
 }
 
@@ -1443,8 +1925,8 @@ mod tests {
     };
 
     use super::{
-        CacheConfig, DirectMappedCache, ReplacementPolicy, SplitL1Cache, StoreAllocationPolicy,
-        WritePolicy,
+        CacheConfig, CacheMaintenance, DirectMappedCache, ReplacementPolicy, SplitL1Cache,
+        StoreAllocationPolicy, WritePolicy,
     };
 
     #[derive(Debug, Clone)]
@@ -1830,6 +2312,45 @@ mod tests {
         assert_eq!(cache.stats().write_back_words, 1);
         assert_eq!(cache.stats().refills, 2);
         assert_eq!(cache.stats().refill_words, 2);
+    }
+
+    #[test]
+    fn write_back_range_flushes_dirty_line_without_eviction() {
+        const RAM_BASE: u64 = 0x1000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(WordDevice::new_zeroed(RAM_BASE, 0x1000, 1))
+            .expect("ram should map");
+
+        let mut cache = DirectMappedCache::new(
+            memory,
+            CacheConfig::new(8, vec![crate::AddressRange::new(RAM_BASE, 0x1000)])
+                .with_write_policy(WritePolicy::WriteBack)
+                .with_store_allocation_policy(StoreAllocationPolicy::WriteAllocate),
+        );
+
+        retry_store32(&mut cache, RAM_BASE, 0xdead_beef);
+        assert_eq!(retry_load32(cache.inner_mut(), RAM_BASE), 0);
+
+        loop {
+            match cache.write_back_range(RAM_BASE, 4) {
+                Ok(()) => break,
+                Err(BusError::Busy { .. }) => cache.tick(),
+                Err(error) => panic!("write-back maintenance failed: {error}"),
+            }
+        }
+
+        assert_eq!(retry_load32(cache.inner_mut(), RAM_BASE), 0xdead_beef);
+        assert_eq!(
+            cache
+                .load32(RAM_BASE)
+                .expect("clean line should stay cached"),
+            0xdead_beef
+        );
+        assert_eq!(cache.stats().write_backs, 1);
+        assert_eq!(cache.stats().write_back_words, 1);
+        assert_eq!(cache.stats().dirty_evictions, 0);
     }
 
     #[test]

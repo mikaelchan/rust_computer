@@ -6,8 +6,9 @@ use rvsim_devices::{
 };
 use rvsim_isa::CsrAddress;
 use rvsim_system::{
-    AddressRange, ArbiterBus, Bus, BusError, CacheConfig, CpuCycle, DirectMappedCache, Machine,
-    MemoryMap, Processor, ReplacementPolicy, SplitL1Cache, StoreAllocationPolicy, WritePolicy,
+    AddressRange, ArbiterBus, Bus, BusError, CacheConfig, CacheMaintenance, CpuCycle,
+    DirectMappedCache, Machine, MemoryMap, Processor, ReplacementPolicy, SplitL1Cache,
+    StoreAllocationPolicy, WritePolicy,
 };
 
 const RESET_VECTOR: u32 = 0x0000_0000;
@@ -17,8 +18,8 @@ const UART_BASE: u64 = 0x2000_0000;
 const INTERRUPT_CONTROLLER_BASE: u64 = 0x4000_0000;
 const MSIP_BASE: u64 = 0x5000_0000;
 const DMA_BASE: u64 = 0x6000_0000;
-const DMA_SOURCE: u64 = RAM_BASE + 0x0800;
-const DMA_DESTINATION: u64 = RAM_BASE + 0x0840;
+const DMA_SOURCE: u64 = RAM_BASE + 0x0040;
+const DMA_DESTINATION: u64 = RAM_BASE + 0x0080;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let program = [
@@ -126,6 +127,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     host_store32(&mut machine, DMA_SOURCE, 0xcafe_babe)?;
     host_store32(&mut machine, DMA_SOURCE + 4, 0x0bad_f00d)?;
+    let _ = host_load32(&mut machine, DMA_DESTINATION)?;
+    let _ = host_load32(&mut machine, DMA_DESTINATION + 4)?;
+    host_write_back_range(&mut machine, DMA_SOURCE, 8)?;
     host_store32(
         &mut machine,
         DMA_BASE + DmaController::SOURCE_OFFSET,
@@ -146,6 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dma_handle = Rc::clone(&dma);
     step_until(&mut machine, 32, move |_| dma_handle.borrow().is_done())?;
 
+    host_invalidate_range(&mut machine, DMA_DESTINATION, 8)?;
     let dma_word0 = host_load32(&mut machine, DMA_DESTINATION)?;
     let dma_word1 = host_load32(&mut machine, DMA_DESTINATION + 4)?;
     let dma_status = host_load32(&mut machine, DMA_BASE + DmaController::CONTROL_OFFSET)?;
@@ -207,7 +212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!(
-        "computer ready: ReferenceCore now demonstrates split L1 caches over a unified L2, DMA bus arbitration, and external plus software interrupts"
+        "computer ready: ReferenceCore now demonstrates split L1 caches over a unified L2, software-managed DMA cache maintenance, DMA bus arbitration, and external plus software interrupts"
     );
 
     Ok(())
@@ -282,6 +287,50 @@ where
     loop {
         match machine.bus_mut().load32(addr) {
             Ok(value) => return Ok(value),
+            Err(BusError::Busy { .. }) => {
+                step_machine(machine)
+                    .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
+            }
+            Err(error) => return Err(Box::new(error)),
+        }
+    }
+}
+
+fn host_write_back_range<P, B>(
+    machine: &mut Machine<P, B>,
+    start: u64,
+    len: u64,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    P: Processor + CpuModel,
+    P::Error: std::error::Error + 'static,
+    B: Bus + CacheMaintenance,
+{
+    loop {
+        match machine.bus_mut().write_back_range(start, len) {
+            Ok(()) => return Ok(()),
+            Err(BusError::Busy { .. }) => {
+                step_machine(machine)
+                    .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
+            }
+            Err(error) => return Err(Box::new(error)),
+        }
+    }
+}
+
+fn host_invalidate_range<P, B>(
+    machine: &mut Machine<P, B>,
+    start: u64,
+    len: u64,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    P: Processor + CpuModel,
+    P::Error: std::error::Error + 'static,
+    B: Bus + CacheMaintenance,
+{
+    loop {
+        match machine.bus_mut().invalidate_range(start, len) {
+            Ok(()) => return Ok(()),
             Err(BusError::Busy { .. }) => {
                 step_machine(machine)
                     .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;

@@ -8,6 +8,7 @@ use crate::bus::{
     BurstResponse, Bus, BusError, InterruptSet, TransactionBus, TransactionPhase,
     TransactionRequest, TransactionResponse,
 };
+use crate::cache::CacheMaintenance;
 
 struct DeviceSlot {
     range: AddressRange,
@@ -713,6 +714,16 @@ impl TransactionBus for MemoryMap {
         id: u64,
     ) -> Option<Result<TransactionResponse, BusError>> {
         MemoryMap::take_transaction_response(self, id)
+    }
+}
+
+impl CacheMaintenance for MemoryMap {
+    fn write_back_range(&mut self, _start: Address, _len: u64) -> Result<(), BusError> {
+        Ok(())
+    }
+
+    fn invalidate_range(&mut self, _start: Address, _len: u64) -> Result<(), BusError> {
+        Ok(())
     }
 }
 
