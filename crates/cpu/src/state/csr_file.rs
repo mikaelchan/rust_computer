@@ -32,6 +32,10 @@ const MIP_MTIP: u32 = 1 << 7;
 const SIP_MASK: u32 = MIP_SSIP | MIP_STIP | MIP_SEIP;
 const MANAGED_INTERRUPT_MASK: u32 = MIP_SSIP | MIP_MSIP | MIP_STIP | MIP_MTIP | MIP_SEIP | MIP_MEIP;
 const MIDELEG_MASK: u32 = MIP_SSIP | MIP_STIP | MIP_SEIP;
+const COUNTEREN_CY: u32 = 1 << 0;
+const COUNTEREN_TM: u32 = 1 << 1;
+const COUNTEREN_IR: u32 = 1 << 2;
+const COUNTEREN_MASK: u32 = COUNTEREN_CY | COUNTEREN_TM | COUNTEREN_IR;
 const INTERRUPT_PRIORITY: [Interrupt; 6] = [
     Interrupt::MachineExternal,
     Interrupt::MachineSoftware,
@@ -49,7 +53,9 @@ pub struct MachineCsrs {
     pub mideleg: u32,
     pub mie: u32,
     pub mtvec: u32,
+    pub mcounteren: u32,
     pub mcycle: u32,
+    pub minstret: u32,
     pub mepc: u32,
     pub mcause: u32,
     pub mtval: u32,
@@ -60,6 +66,7 @@ pub struct MachineCsrs {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SupervisorCsrs {
     pub stvec: u32,
+    pub scounteren: u32,
     pub sepc: u32,
     pub scause: u32,
     pub stval: u32,
@@ -80,13 +87,18 @@ impl CsrFile {
             CsrAddress::Sstatus => self.machine.mstatus & SSTATUS_MASK,
             CsrAddress::Sie => self.machine.mie & SIE_MASK,
             CsrAddress::Stvec => self.supervisor.stvec,
+            CsrAddress::Scounteren => self.supervisor.scounteren,
             CsrAddress::Satp => self.supervisor.satp,
             CsrAddress::Mstatus => self.machine.mstatus,
             CsrAddress::Medeleg => self.machine.medeleg,
             CsrAddress::Mideleg => self.machine.mideleg,
             CsrAddress::Mie => self.machine.mie,
             CsrAddress::Mtvec => self.machine.mtvec,
+            CsrAddress::Mcounteren => self.machine.mcounteren,
             CsrAddress::Mcycle => self.machine.mcycle,
+            CsrAddress::Minstret => self.machine.minstret,
+            CsrAddress::Cycle | CsrAddress::Time => self.machine.mcycle,
+            CsrAddress::Instret => self.machine.minstret,
             CsrAddress::Sepc => self.supervisor.sepc,
             CsrAddress::Scause => self.supervisor.scause,
             CsrAddress::Stval => self.supervisor.stval,
@@ -108,13 +120,18 @@ impl CsrFile {
                 self.machine.mie = (self.machine.mie & !SIE_MASK) | (value & SIE_MASK);
             }
             CsrAddress::Stvec => self.supervisor.stvec = value,
+            CsrAddress::Scounteren => self.supervisor.scounteren = value & COUNTEREN_MASK,
             CsrAddress::Satp => self.supervisor.satp = value,
             CsrAddress::Mstatus => self.machine.mstatus = value,
             CsrAddress::Medeleg => self.machine.medeleg = value,
             CsrAddress::Mideleg => self.machine.mideleg = value & MIDELEG_MASK,
             CsrAddress::Mie => self.machine.mie = value,
             CsrAddress::Mtvec => self.machine.mtvec = value,
+            CsrAddress::Mcounteren => self.machine.mcounteren = value & COUNTEREN_MASK,
             CsrAddress::Mcycle => self.machine.mcycle = value,
+            CsrAddress::Minstret => self.machine.minstret = value,
+            CsrAddress::Cycle | CsrAddress::Time => self.machine.mcycle = value,
+            CsrAddress::Instret => self.machine.minstret = value,
             CsrAddress::Sepc => self.supervisor.sepc = value,
             CsrAddress::Scause => self.supervisor.scause = value,
             CsrAddress::Stval => self.supervisor.stval = value,
@@ -140,6 +157,10 @@ impl CsrFile {
 
     pub fn increment_cycle(&mut self) {
         self.machine.mcycle = self.machine.mcycle.wrapping_add(1);
+    }
+
+    pub fn increment_instret(&mut self, retired: u64) {
+        self.machine.minstret = self.machine.minstret.wrapping_add(retired as u32);
     }
 
     pub fn sync_interrupts(&mut self, interrupts: InterruptSet) {
@@ -202,7 +223,22 @@ impl CsrFile {
 
     #[must_use]
     pub fn allows_csr_access(&self, privilege: PrivilegeMode, address: CsrAddress) -> bool {
-        privilege.csr_level() >= address.min_privilege_level()
+        if privilege.csr_level() < address.min_privilege_level() {
+            return false;
+        }
+
+        let Some(counteren_mask) = address.counteren_mask() else {
+            return true;
+        };
+
+        match privilege {
+            PrivilegeMode::Machine => true,
+            PrivilegeMode::Supervisor => (self.machine.mcounteren & counteren_mask) != 0,
+            PrivilegeMode::User => {
+                (self.machine.mcounteren & counteren_mask) != 0
+                    && (self.supervisor.scounteren & counteren_mask) != 0
+            }
+        }
     }
 
     #[must_use]
@@ -647,5 +683,48 @@ mod tests {
 
         assert!(csrs.tw_enabled());
         assert_eq!(csrs.read(CsrAddress::Sstatus) & super::MSTATUS_TW, 0);
+    }
+
+    #[test]
+    fn supervisor_counter_access_requires_mcounteren() {
+        let mut csrs = CsrFile::default();
+
+        assert!(!csrs.allows_csr_access(PrivilegeMode::Supervisor, CsrAddress::Cycle));
+
+        csrs.write(CsrAddress::Mcounteren, super::COUNTEREN_CY);
+
+        assert!(csrs.allows_csr_access(PrivilegeMode::Supervisor, CsrAddress::Cycle));
+    }
+
+    #[test]
+    fn user_counter_access_requires_machine_and_supervisor_counteren() {
+        let mut csrs = CsrFile::default();
+
+        csrs.write(CsrAddress::Mcounteren, super::COUNTEREN_IR);
+        assert!(!csrs.allows_csr_access(PrivilegeMode::User, CsrAddress::Instret));
+
+        csrs.write(CsrAddress::Scounteren, super::COUNTEREN_IR);
+        assert!(csrs.allows_csr_access(PrivilegeMode::User, CsrAddress::Instret));
+    }
+
+    #[test]
+    fn counter_shadows_reflect_machine_counters_and_time_follows_cycle_domain() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mcycle, 7);
+        csrs.write(CsrAddress::Minstret, 3);
+
+        assert_eq!(csrs.read(CsrAddress::Cycle), 7);
+        assert_eq!(csrs.read(CsrAddress::Time), 7);
+        assert_eq!(csrs.read(CsrAddress::Instret), 3);
+    }
+
+    #[test]
+    fn counteren_writes_are_masked_to_modeled_bits() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mcounteren, u32::MAX);
+        csrs.write(CsrAddress::Scounteren, u32::MAX);
+
+        assert_eq!(csrs.read(CsrAddress::Mcounteren), super::COUNTEREN_MASK);
+        assert_eq!(csrs.read(CsrAddress::Scounteren), super::COUNTEREN_MASK);
     }
 }

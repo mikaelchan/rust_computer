@@ -516,6 +516,7 @@ impl Processor for PipelineCore {
         };
 
         self.stats.retired_instructions += result.retired;
+        self.state.csrs.increment_instret(result.retired);
         self.stats.fetch_stall_cycles += u64::from(fetch_stalled);
         self.stats.decode_stall_cycles += u64::from(decode_stalled);
         self.stats.flush_cycles += u64::from(flushed);
@@ -1738,6 +1739,134 @@ mod tests {
         assert!(!core.hart_state().halted);
         assert_eq!(core.stats().trap_count, 1);
         assert_eq!(core.stats().trap_flushes, 1);
+    }
+
+    #[test]
+    fn user_instret_access_traps_without_full_counteren_chain() {
+        let instruction = encode_csrrs(1, rvsim_isa::CsrAddress::Instret as u16, 0);
+        let mut bus = TestBus::new(64);
+        bus.load_program(&[
+            instruction,
+            encode_jal(0, 0),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mcounteren, 1 << 2);
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("missing scounteren should trap user instret access");
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 0);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            2
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            instruction
+        );
+        assert_eq!(core.stats().trap_count, 1);
+    }
+
+    #[test]
+    fn user_instret_reads_succeed_and_minstret_tracks_retired_instructions() {
+        let mut bus = TestBus::new(64);
+        bus.load_program(&[
+            encode_csrrs(1, rvsim_isa::CsrAddress::Instret as u16, 0),
+            encode_addi(2, 0, 7),
+            encode_csrrs(3, rvsim_isa::CsrAddress::Instret as u16, 0),
+            encode_wfi(),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mcounteren, 1 << 2);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Scounteren, 1 << 2);
+
+        for _ in 0..16 {
+            core.step_cycle(&mut bus)
+                .expect("user instret reads should execute through pipeline");
+            if core.hart_state().halted {
+                break;
+            }
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().registers.read(2), 7);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Minstret),
+            4
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Instret),
+            4
+        );
+        assert!(core.hart_state().halted);
+    }
+
+    #[test]
+    fn writing_instret_shadow_traps_as_illegal_instruction() {
+        let instruction = encode_csrrw(1, rvsim_isa::CsrAddress::Instret as u16, 0);
+        let mut bus = TestBus::new(64);
+        bus.load_program(&[
+            instruction,
+            encode_jal(0, 0),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("writes to readonly instret shadow should trap through pipeline");
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 0);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            2
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            instruction
+        );
+        assert_eq!(core.stats().trap_count, 1);
     }
 
     #[test]

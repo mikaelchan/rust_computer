@@ -163,6 +163,11 @@ pub fn execute(
             }
             let outcome = csr::execute(decoded, csrs, rs1_value)
                 .expect("csr instruction should provide an address");
+            if outcome.write.is_some() && csr.is_read_only() {
+                return ExecuteEvent::Trap(Trap::Exception(Exception::IllegalInstruction {
+                    instruction: decoded.raw.0,
+                }));
+            }
             ExecuteEvent::Advance(ExecuteOutcome {
                 writeback_value: Some(outcome.read_value),
                 csr_write: outcome.write,

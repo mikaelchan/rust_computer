@@ -9,13 +9,19 @@ pub enum CsrAddress {
     Sstatus = 0x100,
     Sie = 0x104,
     Stvec = 0x105,
+    Scounteren = 0x106,
     Satp = 0x180,
     Mstatus = 0x300,
     Medeleg = 0x302,
     Mideleg = 0x303,
     Mie = 0x304,
     Mtvec = 0x305,
+    Mcounteren = 0x306,
     Mcycle = 0xb00,
+    Minstret = 0xb02,
+    Cycle = 0xc00,
+    Time = 0xc01,
+    Instret = 0xc02,
     Sepc = 0x141,
     Scause = 0x142,
     Stval = 0x143,
@@ -31,6 +37,21 @@ impl CsrAddress {
     pub const fn min_privilege_level(self) -> u8 {
         ((self as u16 >> 8) & 0b11) as u8
     }
+
+    #[must_use]
+    pub const fn is_read_only(self) -> bool {
+        ((self as u16 >> 10) & 0b11) == 0b11
+    }
+
+    #[must_use]
+    pub const fn counteren_mask(self) -> Option<u32> {
+        match self {
+            Self::Cycle => Some(1 << 0),
+            Self::Time => Some(1 << 1),
+            Self::Instret => Some(1 << 2),
+            _ => None,
+        }
+    }
 }
 
 impl TryFrom<u16> for CsrAddress {
@@ -41,13 +62,19 @@ impl TryFrom<u16> for CsrAddress {
             0x100 => Ok(Self::Sstatus),
             0x104 => Ok(Self::Sie),
             0x105 => Ok(Self::Stvec),
+            0x106 => Ok(Self::Scounteren),
             0x180 => Ok(Self::Satp),
             0x300 => Ok(Self::Mstatus),
             0x302 => Ok(Self::Medeleg),
             0x303 => Ok(Self::Mideleg),
             0x304 => Ok(Self::Mie),
             0x305 => Ok(Self::Mtvec),
+            0x306 => Ok(Self::Mcounteren),
             0xb00 => Ok(Self::Mcycle),
+            0xb02 => Ok(Self::Minstret),
+            0xc00 => Ok(Self::Cycle),
+            0xc01 => Ok(Self::Time),
+            0xc02 => Ok(Self::Instret),
             0x141 => Ok(Self::Sepc),
             0x142 => Ok(Self::Scause),
             0x143 => Ok(Self::Stval),

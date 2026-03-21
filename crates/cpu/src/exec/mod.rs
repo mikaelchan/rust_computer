@@ -216,6 +216,15 @@ pub fn execute_decoded(
             }
             let outcome = csr::execute(decoded, &state.csrs, rs1_value)
                 .expect("csr instruction should provide an address");
+            if outcome.write.is_some() && csr.is_read_only() {
+                return Ok(apply_trap(
+                    state,
+                    Trap::Exception(Exception::IllegalInstruction {
+                        instruction: decoded.raw.0,
+                    }),
+                    current_pc,
+                ));
+            }
             write_rd(state, decoded.rd, outcome.read_value);
             if let Some(write) = outcome.write {
                 state.csrs.write(write.address, write.value);

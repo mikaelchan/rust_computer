@@ -170,6 +170,7 @@ impl Processor for ReferenceCore {
         self.last_result = execute_decoded(&mut self.state, &mut self.page_walker, bus, decoded)?;
         self.pending_decoded =
             (self.last_result.retired == 0 && self.last_result.trap.is_none()).then_some(decoded);
+        self.state.csrs.increment_instret(self.last_result.retired);
 
         Ok(CpuCycle {
             retired_instructions: self.last_result.retired,
@@ -1254,6 +1255,112 @@ mod tests {
             encode_wfi()
         );
         assert!(!core.hart_state().halted);
+    }
+
+    #[test]
+    fn user_instret_access_traps_without_full_counteren_chain() {
+        let instruction = encode_csrrs(1, rvsim_isa::CsrAddress::Instret as u16, 0);
+        let mut bus = TinyBus::default();
+        bus.load_program(&[instruction]);
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mcounteren, 1 << 2);
+
+        let cycle = core
+            .step_cycle(&mut bus)
+            .expect("missing scounteren should trap user instret access");
+
+        assert_eq!(cycle.retired_instructions, 0);
+        assert!(cycle.stalled);
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 0);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            2
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            instruction
+        );
+    }
+
+    #[test]
+    fn user_instret_reads_succeed_and_minstret_tracks_retired_instructions() {
+        let mut bus = TinyBus::default();
+        bus.load_program(&[
+            encode_csrrs(1, rvsim_isa::CsrAddress::Instret as u16, 0),
+            encode_addi(2, 0, 7),
+            encode_csrrs(3, rvsim_isa::CsrAddress::Instret as u16, 0),
+            encode_wfi(),
+        ]);
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mcounteren, 1 << 2);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Scounteren, 1 << 2);
+
+        for _ in 0..4 {
+            core.step_cycle(&mut bus)
+                .expect("user instret reads should execute");
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().registers.read(2), 7);
+        assert_eq!(core.hart_state().registers.read(3), 2);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Minstret),
+            4
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Instret),
+            4
+        );
+        assert!(core.hart_state().halted);
+    }
+
+    #[test]
+    fn writing_instret_shadow_traps_as_illegal_instruction() {
+        let instruction = encode_csrrw(1, rvsim_isa::CsrAddress::Instret as u16, 0);
+        let mut bus = TinyBus::default();
+        bus.load_program(&[instruction]);
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        let cycle = core
+            .step_cycle(&mut bus)
+            .expect("writes to readonly instret shadow should trap");
+
+        assert_eq!(cycle.retired_instructions, 0);
+        assert!(cycle.stalled);
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 0);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            2
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            instruction
+        );
     }
 
     #[test]
@@ -2345,6 +2452,10 @@ mod tests {
             | (0b101 << 12)
             | ((rd as u32) << 7)
             | 0b1110011
+    }
+
+    fn encode_csrrs(rd: u8, csr: u16, rs1: u8) -> u32 {
+        ((csr as u32) << 20) | ((rs1 as u32) << 15) | (0b010 << 12) | ((rd as u32) << 7) | 0b1110011
     }
 
     fn encode_csrrw(rd: u8, csr: u16, rs1: u8) -> u32 {
