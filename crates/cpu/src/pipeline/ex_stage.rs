@@ -153,6 +153,14 @@ pub fn execute(
                     instruction: decoded.raw.0,
                 }));
             }
+            if matches!(privilege, PrivilegeMode::Supervisor)
+                && csrs.tvm_enabled()
+                && csr == rvsim_isa::CsrAddress::Satp
+            {
+                return ExecuteEvent::Trap(Trap::Exception(Exception::IllegalInstruction {
+                    instruction: decoded.raw.0,
+                }));
+            }
             let outcome = csr::execute(decoded, csrs, rs1_value)
                 .expect("csr instruction should provide an address");
             ExecuteEvent::Advance(ExecuteOutcome {
@@ -175,7 +183,9 @@ pub fn execute(
             ExecuteEvent::Trap(Trap::Exception(Exception::Breakpoint))
         }
         InstructionKind::System(SystemKind::SfenceVma) => {
-            if matches!(privilege, PrivilegeMode::User) {
+            if matches!(privilege, PrivilegeMode::User)
+                || (matches!(privilege, PrivilegeMode::Supervisor) && csrs.tvm_enabled())
+            {
                 return ExecuteEvent::Trap(Trap::Exception(Exception::IllegalInstruction {
                     instruction: decoded.raw.0,
                 }));
@@ -212,7 +222,7 @@ pub fn execute(
             })
         }
         InstructionKind::System(SystemKind::Sret) => {
-            if !matches!(privilege, PrivilegeMode::Supervisor) {
+            if !matches!(privilege, PrivilegeMode::Supervisor) || csrs.tsr_enabled() {
                 return ExecuteEvent::Trap(Trap::Exception(Exception::IllegalInstruction {
                     instruction: decoded.raw.0,
                 }));

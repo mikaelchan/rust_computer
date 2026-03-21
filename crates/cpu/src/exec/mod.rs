@@ -6,7 +6,8 @@ pub mod csr;
 pub mod load_store;
 
 use rvsim_isa::{
-    DecodedInstruction, Exception, LoadKind, StoreKind, SystemKind, Trap, opcode::InstructionKind,
+    CsrAddress, DecodedInstruction, Exception, LoadKind, StoreKind, SystemKind, Trap,
+    opcode::InstructionKind,
 };
 use rvsim_system::{Bus, BusError};
 
@@ -201,6 +202,18 @@ pub fn execute_decoded(
                     current_pc,
                 ));
             }
+            if matches!(state.privilege, PrivilegeMode::Supervisor)
+                && state.csrs.tvm_enabled()
+                && csr == CsrAddress::Satp
+            {
+                return Ok(apply_trap(
+                    state,
+                    Trap::Exception(Exception::IllegalInstruction {
+                        instruction: decoded.raw.0,
+                    }),
+                    current_pc,
+                ));
+            }
             let outcome = csr::execute(decoded, &state.csrs, rs1_value)
                 .expect("csr instruction should provide an address");
             write_rd(state, decoded.rd, outcome.read_value);
@@ -224,7 +237,10 @@ pub fn execute_decoded(
             ));
         }
         InstructionKind::System(SystemKind::SfenceVma) => {
-            if matches!(state.privilege, PrivilegeMode::User) {
+            if matches!(state.privilege, PrivilegeMode::User)
+                || (matches!(state.privilege, PrivilegeMode::Supervisor)
+                    && state.csrs.tvm_enabled())
+            {
                 return Ok(apply_trap(
                     state,
                     Trap::Exception(Exception::IllegalInstruction {
@@ -254,7 +270,7 @@ pub fn execute_decoded(
             return Ok(return_from_trap(state, SystemKind::Mret));
         }
         InstructionKind::System(SystemKind::Sret) => {
-            if !matches!(state.privilege, PrivilegeMode::Supervisor) {
+            if !matches!(state.privilege, PrivilegeMode::Supervisor) || state.csrs.tsr_enabled() {
                 return Ok(apply_trap(
                     state,
                     Trap::Exception(Exception::IllegalInstruction {

@@ -1128,6 +1128,141 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_satp_access_traps_when_tvm_is_set() {
+        let instruction = encode_csrrw(1, rvsim_isa::CsrAddress::Satp as u16, 0);
+        let mut bus = TinyBus::default();
+        bus.load_program(&[instruction]);
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+
+        let mut core = ReferenceCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, MSTATUS_TVM);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+
+        let cycle = core
+            .step_cycle(&mut bus)
+            .expect("tvm should trap supervisor satp access");
+
+        assert_eq!(cycle.retired_instructions, 0);
+        assert!(cycle.stalled);
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Satp),
+            SATP_MODE_SV32 | (0x2000 >> 12)
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc),
+            0x4000
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            2
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            instruction
+        );
+    }
+
+    #[test]
+    fn supervisor_sfence_vma_traps_when_tvm_is_set() {
+        let instruction = encode_sfence_vma(0, 0);
+        let mut bus = TinyBus::default();
+        bus.load_program(&[instruction]);
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, MSTATUS_TVM);
+
+        let cycle = core
+            .step_cycle(&mut bus)
+            .expect("tvm should trap supervisor sfence.vma");
+
+        assert_eq!(cycle.retired_instructions, 0);
+        assert!(cycle.stalled);
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            2
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            instruction
+        );
+    }
+
+    #[test]
+    fn supervisor_sret_traps_when_tsr_is_set() {
+        let instruction = encode_sret();
+        let mut bus = TinyBus::default();
+        bus.load_program(&[instruction]);
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, MSTATUS_TSR);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sepc, 0x40);
+
+        let cycle = core
+            .step_cycle(&mut bus)
+            .expect("tsr should trap supervisor sret");
+
+        assert_eq!(cycle.retired_instructions, 0);
+        assert!(cycle.stalled);
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            2
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            instruction
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sepc),
+            0x40
+        );
+    }
+
+    #[test]
     fn takes_machine_timer_interrupt_when_enabled() {
         let mut bus = InterruptBus {
             pending_interrupts: InterruptSet::from(InterruptLine::MachineTimer),
@@ -1645,6 +1780,8 @@ mod tests {
     const MSTATUS_MPRV: u32 = 1 << 17;
     const MSTATUS_SUM: u32 = 1 << 18;
     const MSTATUS_MXR: u32 = 1 << 19;
+    const MSTATUS_TVM: u32 = 1 << 20;
+    const MSTATUS_TSR: u32 = 1 << 22;
     const MSTATUS_MPP_SHIFT: u32 = 11;
 
     fn encode_lui(rd: u8, upper_20: u32) -> u32 {

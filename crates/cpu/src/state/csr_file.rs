@@ -10,6 +10,8 @@ const MSTATUS_MPIE: u32 = 1 << 7;
 const MSTATUS_SPP: u32 = 1 << 8;
 const MSTATUS_SUM: u32 = 1 << 18;
 const MSTATUS_MXR: u32 = 1 << 19;
+const MSTATUS_TVM: u32 = 1 << 20;
+const MSTATUS_TSR: u32 = 1 << 22;
 const MSTATUS_MPP_SHIFT: u32 = 11;
 const MSTATUS_MPP_MASK: u32 = 0b11 << MSTATUS_MPP_SHIFT;
 const SSTATUS_MASK: u32 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM | MSTATUS_MXR;
@@ -200,6 +202,16 @@ impl CsrFile {
     #[must_use]
     pub fn allows_csr_access(&self, privilege: PrivilegeMode, address: CsrAddress) -> bool {
         privilege.csr_level() >= address.min_privilege_level()
+    }
+
+    #[must_use]
+    pub fn tvm_enabled(&self) -> bool {
+        (self.machine.mstatus & MSTATUS_TVM) != 0
+    }
+
+    #[must_use]
+    pub fn tsr_enabled(&self) -> bool {
+        (self.machine.mstatus & MSTATUS_TSR) != 0
     }
 
     fn delegates_trap_to_supervisor(&self, trap: Trap, current_privilege: PrivilegeMode) -> bool {
