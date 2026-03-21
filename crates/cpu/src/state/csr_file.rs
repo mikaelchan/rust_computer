@@ -25,6 +25,16 @@ const MIP_SEIP: u32 = 1 << 9;
 const MIP_MEIP: u32 = 1 << 11;
 const MIP_MTIP: u32 = 1 << 7;
 const SIP_MASK: u32 = MIP_SSIP | MIP_STIP | MIP_SEIP;
+const MANAGED_INTERRUPT_MASK: u32 = MIP_SSIP | MIP_MSIP | MIP_STIP | MIP_MTIP | MIP_SEIP | MIP_MEIP;
+const MIDELEG_MASK: u32 = MIP_SSIP | MIP_STIP | MIP_SEIP;
+const INTERRUPT_PRIORITY: [Interrupt; 6] = [
+    Interrupt::MachineExternal,
+    Interrupt::MachineSoftware,
+    Interrupt::MachineTimer,
+    Interrupt::SupervisorExternal,
+    Interrupt::SupervisorSoftware,
+    Interrupt::SupervisorTimer,
+];
 
 /// Machine-mode CSR values required by the first milestone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -96,7 +106,7 @@ impl CsrFile {
             CsrAddress::Satp => self.supervisor.satp = value,
             CsrAddress::Mstatus => self.machine.mstatus = value,
             CsrAddress::Medeleg => self.machine.medeleg = value,
-            CsrAddress::Mideleg => self.machine.mideleg = value,
+            CsrAddress::Mideleg => self.machine.mideleg = value & MIDELEG_MASK,
             CsrAddress::Mie => self.machine.mie = value,
             CsrAddress::Mtvec => self.machine.mtvec = value,
             CsrAddress::Mcycle => self.machine.mcycle = value,
@@ -128,7 +138,11 @@ impl CsrFile {
     }
 
     pub fn sync_interrupts(&mut self, interrupts: InterruptSet) {
-        self.machine.mip &= !(MIP_MSIP | MIP_MEIP | MIP_MTIP);
+        self.machine.mip &= !MANAGED_INTERRUPT_MASK;
+
+        if interrupts.contains(InterruptLine::SupervisorSoftware) {
+            self.machine.mip |= MIP_SSIP;
+        }
 
         if interrupts.contains(InterruptLine::MachineExternal) {
             self.machine.mip |= MIP_MEIP;
@@ -138,8 +152,16 @@ impl CsrFile {
             self.machine.mip |= MIP_MSIP;
         }
 
+        if interrupts.contains(InterruptLine::SupervisorTimer) {
+            self.machine.mip |= MIP_STIP;
+        }
+
         if interrupts.contains(InterruptLine::MachineTimer) {
             self.machine.mip |= MIP_MTIP;
+        }
+
+        if interrupts.contains(InterruptLine::SupervisorExternal) {
+            self.machine.mip |= MIP_SEIP;
         }
     }
 
@@ -153,48 +175,24 @@ impl CsrFile {
     }
 
     #[must_use]
-    pub fn pending_machine_interrupt(&self) -> Option<Interrupt> {
-        if (self.machine.mstatus & MSTATUS_MIE) == 0 {
-            return None;
-        }
+    pub fn pending_interrupt(&self, current_privilege: PrivilegeMode) -> Option<Interrupt> {
+        for interrupt in INTERRUPT_PRIORITY {
+            if !self.interrupt_is_pending(interrupt) || !self.interrupt_is_enabled(interrupt) {
+                continue;
+            }
 
-        if (self.machine.mie & MIE_MEIE) != 0 && (self.machine.mip & MIP_MEIP) != 0 {
-            return Some(Interrupt::MachineExternal);
-        }
+            let Some(target_privilege) =
+                self.interrupt_target_privilege(interrupt, current_privilege)
+            else {
+                continue;
+            };
 
-        if (self.machine.mie & MIE_MSIE) != 0 && (self.machine.mip & MIP_MSIP) != 0 {
-            return Some(Interrupt::MachineSoftware);
-        }
-
-        if (self.machine.mie & MIE_MTIE) != 0 && (self.machine.mip & MIP_MTIP) != 0 {
-            return Some(Interrupt::MachineTimer);
+            if self.interrupt_globally_enabled(target_privilege, current_privilege) {
+                return Some(interrupt);
+            }
         }
 
         None
-    }
-
-    #[must_use]
-    pub fn machine_timer_interrupt_enabled(&self) -> bool {
-        matches!(
-            self.pending_machine_interrupt(),
-            Some(Interrupt::MachineTimer)
-        )
-    }
-
-    #[must_use]
-    pub fn machine_external_interrupt_enabled(&self) -> bool {
-        matches!(
-            self.pending_machine_interrupt(),
-            Some(Interrupt::MachineExternal)
-        )
-    }
-
-    #[must_use]
-    pub fn machine_software_interrupt_enabled(&self) -> bool {
-        matches!(
-            self.pending_machine_interrupt(),
-            Some(Interrupt::MachineSoftware)
-        )
     }
 
     #[must_use]
@@ -209,7 +207,54 @@ impl CsrFile {
 
         match trap {
             Trap::Exception(_) => (self.machine.medeleg & (1 << trap.cause_code())) != 0,
-            Trap::Interrupt(_) => false,
+            Trap::Interrupt(interrupt) => self.delegates_interrupt_to_supervisor(interrupt),
+        }
+    }
+
+    fn interrupt_is_pending(&self, interrupt: Interrupt) -> bool {
+        (self.machine.mip & interrupt_pending_mask(interrupt)) != 0
+    }
+
+    fn interrupt_is_enabled(&self, interrupt: Interrupt) -> bool {
+        (self.machine.mie & interrupt_enable_mask(interrupt)) != 0
+    }
+
+    fn delegates_interrupt_to_supervisor(&self, interrupt: Interrupt) -> bool {
+        interrupt.is_supervisor() && (self.machine.mideleg & (1 << interrupt.cause_code())) != 0
+    }
+
+    fn interrupt_target_privilege(
+        &self,
+        interrupt: Interrupt,
+        current_privilege: PrivilegeMode,
+    ) -> Option<PrivilegeMode> {
+        if self.delegates_interrupt_to_supervisor(interrupt) {
+            if matches!(current_privilege, PrivilegeMode::Machine) {
+                None
+            } else {
+                Some(PrivilegeMode::Supervisor)
+            }
+        } else {
+            Some(PrivilegeMode::Machine)
+        }
+    }
+
+    fn interrupt_globally_enabled(
+        &self,
+        target_privilege: PrivilegeMode,
+        current_privilege: PrivilegeMode,
+    ) -> bool {
+        match target_privilege {
+            PrivilegeMode::Machine => {
+                !matches!(current_privilege, PrivilegeMode::Machine)
+                    || (self.machine.mstatus & MSTATUS_MIE) != 0
+            }
+            PrivilegeMode::Supervisor => {
+                matches!(current_privilege, PrivilegeMode::User)
+                    || (matches!(current_privilege, PrivilegeMode::Supervisor)
+                        && (self.machine.mstatus & MSTATUS_SIE) != 0)
+            }
+            PrivilegeMode::User => false,
         }
     }
 
@@ -332,6 +377,28 @@ const fn set_flag(value: u32, mask: u32, enabled: bool) -> u32 {
     if enabled { value | mask } else { value & !mask }
 }
 
+const fn interrupt_pending_mask(interrupt: Interrupt) -> u32 {
+    match interrupt {
+        Interrupt::SupervisorSoftware => MIP_SSIP,
+        Interrupt::MachineSoftware => MIP_MSIP,
+        Interrupt::SupervisorTimer => MIP_STIP,
+        Interrupt::MachineTimer => MIP_MTIP,
+        Interrupt::SupervisorExternal => MIP_SEIP,
+        Interrupt::MachineExternal => MIP_MEIP,
+    }
+}
+
+const fn interrupt_enable_mask(interrupt: Interrupt) -> u32 {
+    match interrupt {
+        Interrupt::SupervisorSoftware => MIE_SSIE,
+        Interrupt::MachineSoftware => MIE_MSIE,
+        Interrupt::SupervisorTimer => MIE_STIE,
+        Interrupt::MachineTimer => MIE_MTIE,
+        Interrupt::SupervisorExternal => MIE_SEIE,
+        Interrupt::MachineExternal => MIE_MEIE,
+    }
+}
+
 const fn privilege_bits(privilege: PrivilegeMode) -> u32 {
     match privilege {
         PrivilegeMode::User => 0 << MSTATUS_MPP_SHIFT,
@@ -357,15 +424,21 @@ mod tests {
     use crate::state::PrivilegeMode;
 
     #[test]
-    fn syncs_pending_machine_interrupt_bits_from_interrupt_set() {
+    fn syncs_pending_supervisor_and_machine_interrupt_bits_from_interrupt_set() {
         let mut csrs = CsrFile::default();
         csrs.sync_interrupts(
-            InterruptSet::from(InterruptLine::MachineSoftware)
+            InterruptSet::from(InterruptLine::SupervisorSoftware)
+                .union(InterruptSet::from(InterruptLine::MachineSoftware))
+                .union(InterruptSet::from(InterruptLine::SupervisorTimer))
                 .union(InterruptSet::from(InterruptLine::MachineTimer))
+                .union(InterruptSet::from(InterruptLine::SupervisorExternal))
                 .union(InterruptSet::from(InterruptLine::MachineExternal)),
         );
 
-        assert_eq!(csrs.read(CsrAddress::Mip), (1 << 3) | (1 << 7) | (1 << 11));
+        assert_eq!(
+            csrs.read(CsrAddress::Mip),
+            (1 << 1) | (1 << 3) | (1 << 5) | (1 << 7) | (1 << 9) | (1 << 11)
+        );
     }
 
     #[test]
@@ -380,7 +453,7 @@ mod tests {
         );
 
         assert_eq!(
-            csrs.pending_machine_interrupt(),
+            csrs.pending_interrupt(PrivilegeMode::Machine),
             Some(Interrupt::MachineExternal)
         );
     }
@@ -396,9 +469,89 @@ mod tests {
         );
 
         assert_eq!(
-            csrs.pending_machine_interrupt(),
+            csrs.pending_interrupt(PrivilegeMode::Machine),
             Some(Interrupt::MachineSoftware)
         );
+    }
+
+    #[test]
+    fn delegated_supervisor_interrupt_is_pending_in_user_mode() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mideleg, 1 << 9);
+        csrs.write(CsrAddress::Sie, 1 << 9);
+        csrs.sync_interrupts(InterruptSet::from(InterruptLine::SupervisorExternal));
+
+        assert_eq!(
+            csrs.pending_interrupt(PrivilegeMode::User),
+            Some(Interrupt::SupervisorExternal)
+        );
+    }
+
+    #[test]
+    fn delegated_supervisor_interrupt_is_masked_in_machine_mode() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mstatus, 1 << 3);
+        csrs.write(CsrAddress::Mideleg, 1 << 9);
+        csrs.write(CsrAddress::Sie, 1 << 9);
+        csrs.sync_interrupts(InterruptSet::from(InterruptLine::SupervisorExternal));
+
+        assert_eq!(csrs.pending_interrupt(PrivilegeMode::Machine), None);
+    }
+
+    #[test]
+    fn supervisor_mode_requires_sie_for_delegated_supervisor_interrupts() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mideleg, 1 << 1);
+        csrs.write(CsrAddress::Sie, 1 << 1);
+        csrs.sync_interrupts(InterruptSet::from(InterruptLine::SupervisorSoftware));
+
+        assert_eq!(csrs.pending_interrupt(PrivilegeMode::Supervisor), None);
+
+        csrs.write(CsrAddress::Sstatus, 1 << 1);
+
+        assert_eq!(
+            csrs.pending_interrupt(PrivilegeMode::Supervisor),
+            Some(Interrupt::SupervisorSoftware)
+        );
+    }
+
+    #[test]
+    fn nondelegated_supervisor_interrupt_still_targets_machine_mode() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mie, 1 << 9);
+        csrs.write(CsrAddress::Mtvec, 0x40);
+
+        let (privilege, handler_pc) = csrs.enter_trap(
+            Trap::Interrupt(Interrupt::SupervisorExternal),
+            0x18,
+            PrivilegeMode::User,
+        );
+
+        assert_eq!(privilege, PrivilegeMode::Machine);
+        assert_eq!(handler_pc, 0x40);
+        assert_eq!(csrs.read(CsrAddress::Mcause), (1 << 31) | 9);
+        assert_eq!(csrs.read(CsrAddress::Mepc), 0x18);
+    }
+
+    #[test]
+    fn delegated_supervisor_interrupt_enters_supervisor_trap_state() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mideleg, 1 << 1);
+        csrs.write(CsrAddress::Stvec, 0x80);
+        csrs.write(CsrAddress::Sie, 1 << 1);
+
+        let (privilege, handler_pc) = csrs.enter_trap(
+            Trap::Interrupt(Interrupt::SupervisorSoftware),
+            0x24,
+            PrivilegeMode::User,
+        );
+
+        assert_eq!(privilege, PrivilegeMode::Supervisor);
+        assert_eq!(handler_pc, 0x80);
+        assert_eq!(csrs.read(CsrAddress::Sepc), 0x24);
+        assert_eq!(csrs.read(CsrAddress::Scause), (1 << 31) | 1);
+        assert_eq!(csrs.read(CsrAddress::Stval), 0);
+        assert_eq!(csrs.read(CsrAddress::Sstatus) & (1 << 5), 0);
     }
 
     #[test]

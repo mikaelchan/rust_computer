@@ -16,8 +16,11 @@ pub enum AccessKind {
 /// Interrupt lines exposed by memory-mapped devices to the CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptLine {
+    SupervisorSoftware,
     MachineSoftware,
+    SupervisorTimer,
     MachineTimer,
+    SupervisorExternal,
     MachineExternal,
 }
 
@@ -28,9 +31,12 @@ pub struct InterruptSet {
 }
 
 impl InterruptSet {
-    const MACHINE_SOFTWARE_BIT: u8 = 1 << 0;
-    const MACHINE_TIMER_BIT: u8 = 1 << 1;
-    const MACHINE_EXTERNAL_BIT: u8 = 1 << 2;
+    const SUPERVISOR_SOFTWARE_BIT: u8 = 1 << 0;
+    const MACHINE_SOFTWARE_BIT: u8 = 1 << 1;
+    const SUPERVISOR_TIMER_BIT: u8 = 1 << 2;
+    const MACHINE_TIMER_BIT: u8 = 1 << 3;
+    const SUPERVISOR_EXTERNAL_BIT: u8 = 1 << 4;
+    const MACHINE_EXTERNAL_BIT: u8 = 1 << 5;
 
     #[must_use]
     pub const fn empty() -> Self {
@@ -39,24 +45,14 @@ impl InterruptSet {
 
     #[must_use]
     pub const fn from_line(line: InterruptLine) -> Self {
-        let bits = match line {
-            InterruptLine::MachineSoftware => Self::MACHINE_SOFTWARE_BIT,
-            InterruptLine::MachineTimer => Self::MACHINE_TIMER_BIT,
-            InterruptLine::MachineExternal => Self::MACHINE_EXTERNAL_BIT,
-        };
-
-        Self { bits }
+        Self {
+            bits: Self::mask_for(line),
+        }
     }
 
     #[must_use]
     pub const fn contains(self, line: InterruptLine) -> bool {
-        let mask = match line {
-            InterruptLine::MachineSoftware => Self::MACHINE_SOFTWARE_BIT,
-            InterruptLine::MachineTimer => Self::MACHINE_TIMER_BIT,
-            InterruptLine::MachineExternal => Self::MACHINE_EXTERNAL_BIT,
-        };
-
-        (self.bits & mask) != 0
+        (self.bits & Self::mask_for(line)) != 0
     }
 
     #[must_use]
@@ -74,8 +70,25 @@ impl InterruptSet {
             Some(InterruptLine::MachineSoftware)
         } else if self.contains(InterruptLine::MachineTimer) {
             Some(InterruptLine::MachineTimer)
+        } else if self.contains(InterruptLine::SupervisorExternal) {
+            Some(InterruptLine::SupervisorExternal)
+        } else if self.contains(InterruptLine::SupervisorSoftware) {
+            Some(InterruptLine::SupervisorSoftware)
+        } else if self.contains(InterruptLine::SupervisorTimer) {
+            Some(InterruptLine::SupervisorTimer)
         } else {
             None
+        }
+    }
+
+    const fn mask_for(line: InterruptLine) -> u8 {
+        match line {
+            InterruptLine::SupervisorSoftware => Self::SUPERVISOR_SOFTWARE_BIT,
+            InterruptLine::MachineSoftware => Self::MACHINE_SOFTWARE_BIT,
+            InterruptLine::SupervisorTimer => Self::SUPERVISOR_TIMER_BIT,
+            InterruptLine::MachineTimer => Self::MACHINE_TIMER_BIT,
+            InterruptLine::SupervisorExternal => Self::SUPERVISOR_EXTERNAL_BIT,
+            InterruptLine::MachineExternal => Self::MACHINE_EXTERNAL_BIT,
         }
     }
 }

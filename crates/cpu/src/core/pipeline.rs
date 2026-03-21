@@ -196,7 +196,7 @@ impl Processor for PipelineCore {
         }
 
         if !bus.is_busy()
-            && let Some(interrupt) = self.state.csrs.pending_machine_interrupt()
+            && let Some(interrupt) = self.state.csrs.pending_interrupt(self.state.privilege)
         {
             let current_pc = self.state.pc;
             trap_result = Some(apply_trap(
@@ -498,6 +498,7 @@ impl Processor for PipelineCore {
 mod tests {
     use rvsim_devices::{
         InterruptController, LatencyAdapter, MachineSoftwareInterrupt, MachineTimer, Ram, Rom,
+        SupervisorSoftwareInterrupt,
     };
     use rvsim_system::{
         AddressRange, Bus, BusError, CacheConfig, Machine, MemoryMap, Processor, SplitL1Cache,
@@ -1136,6 +1137,89 @@ mod tests {
         );
         assert_eq!(machine.cpu().stats().trap_count, 1);
         assert_eq!(machine.cpu().stats().trap_flushes, 1);
+    }
+
+    #[test]
+    fn takes_delegated_supervisor_software_interrupt_from_ssip_device() {
+        const SSIP_BASE: u64 = 0x6000_0000;
+
+        let mut memory = MemoryMap::new();
+        memory
+            .map_device(Rom::from_words(
+                0,
+                &[
+                    encode_addi(1, 0, 5),
+                    encode_jal(0, 0),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    encode_lui(2, 0x60000),
+                    encode_sw(0, 2, 0),
+                    encode_addi(10, 0, 4),
+                    encode_sret(),
+                ],
+            ))
+            .expect("rom should map");
+        memory
+            .map_device(SupervisorSoftwareInterrupt::new(SSIP_BASE))
+            .expect("ssip device should map");
+
+        let mut machine = Machine::new(PipelineCore::new(0), memory);
+        machine
+            .bus_mut()
+            .store32(SSIP_BASE, 1)
+            .expect("ssip register should write");
+        machine.cpu_mut().hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mideleg, 1 << 1);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sie, 1 << 1);
+        machine
+            .cpu_mut()
+            .hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x20);
+
+        for _ in 0..14 {
+            machine
+                .step_cycle()
+                .expect("pipeline supervisor interrupt cycle should work");
+        }
+
+        assert_eq!(machine.cpu().hart_state().registers.read(1), 5);
+        assert_eq!(machine.cpu().hart_state().registers.read(10), 4);
+        assert_eq!(
+            machine.cpu().hart_state().privilege,
+            crate::state::PrivilegeMode::User
+        );
+        assert_eq!(
+            machine
+                .cpu()
+                .hart_state()
+                .csrs
+                .read(rvsim_isa::CsrAddress::Scause),
+            (1_u32 << 31) | 1
+        );
+        assert_eq!(
+            machine
+                .cpu()
+                .hart_state()
+                .csrs
+                .read(rvsim_isa::CsrAddress::Sepc),
+            0
+        );
+        assert_eq!(machine.cpu().stats().trap_count, 1);
+        assert_eq!(machine.cpu().stats().trap_flushes, 1);
+        assert_eq!(machine.cpu().stats().return_flushes, 1);
     }
 
     #[test]

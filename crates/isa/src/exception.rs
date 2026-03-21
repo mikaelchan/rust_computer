@@ -2,12 +2,37 @@
 
 use core::fmt;
 
-/// Interrupt causes used by machine mode.
+/// Interrupt causes modeled by the current privileged CPU slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Interrupt {
+    SupervisorSoftware,
     MachineSoftware,
+    SupervisorTimer,
     MachineTimer,
+    SupervisorExternal,
     MachineExternal,
+}
+
+impl Interrupt {
+    #[must_use]
+    pub const fn cause_code(self) -> u32 {
+        match self {
+            Self::SupervisorSoftware => 1,
+            Self::MachineSoftware => 3,
+            Self::SupervisorTimer => 5,
+            Self::MachineTimer => 7,
+            Self::SupervisorExternal => 9,
+            Self::MachineExternal => 11,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_supervisor(self) -> bool {
+        matches!(
+            self,
+            Self::SupervisorSoftware | Self::SupervisorTimer | Self::SupervisorExternal
+        )
+    }
 }
 
 /// Exception causes raised by the initial RV32I implementation.
@@ -39,7 +64,7 @@ impl Trap {
     #[must_use]
     pub const fn cause_code(self) -> u32 {
         match self {
-            Self::Interrupt(Interrupt::MachineSoftware) => 3,
+            Self::Interrupt(interrupt) => interrupt.cause_code(),
             Self::Exception(Exception::InstructionAddressMisaligned { .. }) => 0,
             Self::Exception(Exception::IllegalInstruction { .. }) => 2,
             Self::Exception(Exception::Breakpoint) => 3,
@@ -48,8 +73,6 @@ impl Trap {
             Self::Exception(Exception::EnvironmentCallFromUMode) => 8,
             Self::Exception(Exception::EnvironmentCallFromSMode) => 9,
             Self::Exception(Exception::EnvironmentCallFromMMode) => 11,
-            Self::Interrupt(Interrupt::MachineTimer) => 7,
-            Self::Interrupt(Interrupt::MachineExternal) => 11,
         }
     }
 

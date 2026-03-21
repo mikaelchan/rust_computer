@@ -6,7 +6,7 @@ The current baseline already has:
 
 - a cycle-driven single-core machine
 - reference and pipeline CPU models
-- interrupt controller, machine timer, machine software interrupt source, UART
+- interrupt controller, machine and supervisor software interrupt sources, machine timer, UART
 - fixed bus wait states
 - unified cache and split L1 instruction/data cache
 - configurable cache line size, associativity, and replacement policy
@@ -67,8 +67,11 @@ The current baseline already has:
 - [x] Add the first supervisor-mode privilege slice.
   The CPU now models supervisor trap CSRs, `sret`, synchronous exception delegation through `medeleg`, and CSR privilege checks across both the reference and pipeline cores.
 
+- [x] Add delegated supervisor interrupt delivery.
+  The bus and CPU now model supervisor software/timer/external interrupt lines, privilege-aware interrupt arbitration through `mideleg`, `mie/mip`, `sie/sip`, and `mstatus`/`sstatus`, plus end-to-end supervisor software-interrupt handling in both CPU models.
+
 - [ ] Extend privilege support beyond the first supervisor slice.
-  Supervisor interrupt delegation and delivery, fuller privileged CSR semantics, and real `satp`-driven translation remain future work.
+  Fuller privileged CSR semantics, richer supervisor-capable external devices, nested interrupt behavior, and real `satp`-driven translation remain future work.
 
 - [ ] Add virtual memory support.
   A future MMU/TLB implementation should come after the cache/memory hierarchy is stable enough to study address translation interactions cleanly.

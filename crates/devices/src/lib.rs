@@ -10,6 +10,7 @@ pub mod machine_timer;
 pub mod ram;
 pub mod rom;
 pub mod simple_uart;
+pub mod supervisor_software_interrupt;
 
 pub use block_device::BlockDevice;
 pub use dma_controller::DmaController;
@@ -21,3 +22,4 @@ pub use machine_timer::MachineTimer;
 pub use ram::Ram;
 pub use rom::Rom;
 pub use simple_uart::SimpleUart;
+pub use supervisor_software_interrupt::SupervisorSoftwareInterrupt;
