@@ -37,6 +37,12 @@ pub fn write_back(
         }
 
         state.pc = payload.next_pc;
+        if matches!(
+            payload.decoded.kind,
+            rvsim_isa::InstructionKind::System(SystemKind::Wfi)
+        ) {
+            state.halted = true;
+        }
         payload.next_pc
     };
 

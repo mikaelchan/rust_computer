@@ -74,19 +74,19 @@ impl Processor for ReferenceCore {
         self.state.csrs.increment_cycle();
         self.state.csrs.sync_interrupts(bus.pending_interrupts());
 
-        if self.state.halted {
-            return Ok(CpuCycle {
-                retired_instructions: 0,
-                stalled: true,
-            });
-        }
-
         if self.pending_decoded.is_none()
             && !bus.is_busy()
             && let Some(interrupt) = self.state.csrs.pending_interrupt(self.state.privilege)
         {
             let current_pc = self.state.pc;
             self.last_result = apply_trap(&mut self.state, Trap::Interrupt(interrupt), current_pc);
+            return Ok(CpuCycle {
+                retired_instructions: 0,
+                stalled: true,
+            });
+        }
+
+        if self.state.halted {
             return Ok(CpuCycle {
                 retired_instructions: 0,
                 stalled: true,
@@ -198,6 +198,7 @@ mod tests {
     #[derive(Debug)]
     struct TinyBus {
         bytes: Vec<u8>,
+        pending_interrupts: InterruptSet,
     }
 
     impl Default for TinyBus {
@@ -210,6 +211,7 @@ mod tests {
         fn new(size: usize) -> Self {
             Self {
                 bytes: vec![0; size],
+                pending_interrupts: InterruptSet::empty(),
             }
         }
 
@@ -243,6 +245,10 @@ mod tests {
         fn store8(&mut self, addr: u64, value: u8) -> Result<(), rvsim_system::BusError> {
             self.bytes[addr as usize] = value;
             Ok(())
+        }
+
+        fn pending_interrupts(&self) -> InterruptSet {
+            self.pending_interrupts
         }
     }
 
@@ -1160,6 +1166,94 @@ mod tests {
             core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
             0x4000
         );
+    }
+
+    #[test]
+    fn wfi_halts_until_interrupt_then_enters_machine_handler() {
+        let mut bus = TinyBus::default();
+        bus.load_program(&[encode_wfi(), encode_addi(1, 0, 1), encode_jal(0, 0)]);
+        bus.store_words(0x0020, &[encode_addi(10, 0, 7), encode_jal(0, 0)]);
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        let first = core.step_cycle(&mut bus).expect("wfi should retire");
+        assert_eq!(first.retired_instructions, 1);
+        assert!(core.hart_state().halted);
+        assert_eq!(core.hart_state().pc, 4);
+
+        let second = core
+            .step_cycle(&mut bus)
+            .expect("halted hart should stall without interrupts");
+        assert_eq!(second.retired_instructions, 0);
+        assert!(second.stalled);
+        assert_eq!(core.hart_state().registers.read(10), 0);
+
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::MachineSoftware);
+
+        let third = core
+            .step_cycle(&mut bus)
+            .expect("interrupt should wake halted hart");
+        assert_eq!(third.retired_instructions, 0);
+        assert!(third.stalled);
+        assert!(!core.hart_state().halted);
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 4);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            (1_u32 << 31) | 3
+        );
+
+        core.step_cycle(&mut bus)
+            .expect("machine handler should execute after waking from wfi");
+        assert_eq!(core.hart_state().registers.read(10), 7);
+        assert_eq!(core.hart_state().registers.read(1), 0);
+    }
+
+    #[test]
+    fn supervisor_wfi_traps_when_tw_is_set() {
+        let mut bus = TinyBus::default();
+        bus.load_program(&[encode_wfi(), encode_jal(0, 0)]);
+        bus.store_words(0x0020, &[encode_jal(0, 0)]);
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 21);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        let cycle = core
+            .step_cycle(&mut bus)
+            .expect("tw-gated supervisor wfi should trap");
+
+        assert_eq!(cycle.retired_instructions, 0);
+        assert!(cycle.stalled);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 0);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            2
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            encode_wfi()
+        );
+        assert!(!core.hart_state().halted);
     }
 
     #[test]
@@ -2270,6 +2364,10 @@ mod tests {
 
     fn encode_sret() -> u32 {
         0x1020_0073
+    }
+
+    fn encode_wfi() -> u32 {
+        0x1050_0073
     }
 
     fn encode_sfence_vma(rs1: u8, rs2: u8) -> u32 {

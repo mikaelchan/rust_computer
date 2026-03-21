@@ -11,6 +11,7 @@ const MSTATUS_SPP: u32 = 1 << 8;
 const MSTATUS_SUM: u32 = 1 << 18;
 const MSTATUS_MXR: u32 = 1 << 19;
 const MSTATUS_TVM: u32 = 1 << 20;
+const MSTATUS_TW: u32 = 1 << 21;
 const MSTATUS_TSR: u32 = 1 << 22;
 const MSTATUS_MPP_SHIFT: u32 = 11;
 const MSTATUS_MPP_MASK: u32 = 0b11 << MSTATUS_MPP_SHIFT;
@@ -212,6 +213,11 @@ impl CsrFile {
     #[must_use]
     pub fn tsr_enabled(&self) -> bool {
         (self.machine.mstatus & MSTATUS_TSR) != 0
+    }
+
+    #[must_use]
+    pub fn tw_enabled(&self) -> bool {
+        (self.machine.mstatus & MSTATUS_TW) != 0
     }
 
     fn delegates_trap_to_supervisor(&self, trap: Trap, current_privilege: PrivilegeMode) -> bool {
@@ -630,5 +636,16 @@ mod tests {
             csrs.read(CsrAddress::Mstatus) & (super::MSTATUS_SUM | super::MSTATUS_MXR),
             super::MSTATUS_SUM | super::MSTATUS_MXR
         );
+    }
+
+    #[test]
+    fn tw_enabled_reflects_mstatus_without_leaking_into_sstatus() {
+        let mut csrs = CsrFile::default();
+        assert!(!csrs.tw_enabled());
+
+        csrs.write(CsrAddress::Mstatus, super::MSTATUS_TW);
+
+        assert!(csrs.tw_enabled());
+        assert_eq!(csrs.read(CsrAddress::Sstatus) & super::MSTATUS_TW, 0);
     }
 }

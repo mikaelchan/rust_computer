@@ -61,6 +61,7 @@ pub enum SystemKind {
     Ecall,
     Ebreak,
     SfenceVma,
+    Wfi,
     Mret,
     Sret,
 }

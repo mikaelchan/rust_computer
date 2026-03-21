@@ -232,6 +232,7 @@ fn decode_system(raw: u32) -> Result<SystemKind, DecodeError> {
     match raw {
         0x0000_0073 => Ok(SystemKind::Ecall),
         0x0010_0073 => Ok(SystemKind::Ebreak),
+        0x1050_0073 => Ok(SystemKind::Wfi),
         0x1020_0073 => Ok(SystemKind::Sret),
         0x3020_0073 => Ok(SystemKind::Mret),
         _ if (raw & 0xfe00_7fff) == 0x1200_0073 => Ok(SystemKind::SfenceVma),
@@ -321,6 +322,12 @@ mod tests {
     fn decode_sret() {
         let decoded = decode(0x1020_0073, 0).expect("sret should decode");
         assert_eq!(decoded.kind, InstructionKind::System(SystemKind::Sret));
+    }
+
+    #[test]
+    fn decode_wfi() {
+        let decoded = decode(0x1050_0073, 0).expect("wfi should decode");
+        assert_eq!(decoded.kind, InstructionKind::System(SystemKind::Wfi));
     }
 
     #[test]

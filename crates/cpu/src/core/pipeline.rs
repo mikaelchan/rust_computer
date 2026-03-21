@@ -162,8 +162,36 @@ impl Processor for PipelineCore {
         self.state.csrs.sync_interrupts(bus.pending_interrupts());
 
         if self.state.halted {
+            if !bus.is_busy()
+                && let Some(interrupt) = self.state.csrs.pending_interrupt(self.state.privilege)
+            {
+                let current_pc = self.state.pc;
+                let result = apply_trap(&mut self.state, Trap::Interrupt(interrupt), current_pc);
+                self.stats.flush_cycles += 1;
+                self.stats.trap_flushes += 1;
+                self.stats.trap_count += 1;
+                self.front_end_pc = self.state.pc;
+                self.latches = PipelineLatches::default();
+                self.last_commit = None;
+                self.last_result = result;
+                self.last_trace = PipelineTrace {
+                    cycle: self.cycle,
+                    trap: result.trap,
+                    flush_reason: Some(FlushReason::Trap),
+                    fetch_stalled: true,
+                    flushed: true,
+                    note: "interrupt",
+                    ..PipelineTrace::default()
+                };
+                return Ok(CpuCycle {
+                    retired_instructions: 0,
+                    stalled: true,
+                });
+            }
+
             self.stats.fetch_stall_cycles += 1;
             self.last_commit = None;
+            self.last_result = ExecutionResult::default();
             self.last_trace = PipelineTrace {
                 cycle: self.cycle,
                 note: "halted",
@@ -557,8 +585,8 @@ mod tests {
         MachineTimer, Ram, Rom, SupervisorSoftwareInterrupt,
     };
     use rvsim_system::{
-        AddressRange, ArbiterBus, Bus, BusError, CacheConfig, Machine, MemoryMap, Processor,
-        SplitL1Cache, StoreAllocationPolicy, WritePolicy,
+        AddressRange, ArbiterBus, Bus, BusError, CacheConfig, InterruptLine, InterruptSet, Machine,
+        MemoryMap, Processor, SplitL1Cache, StoreAllocationPolicy, WritePolicy,
     };
 
     use super::PipelineCore;
@@ -567,12 +595,14 @@ mod tests {
     #[derive(Debug, Clone)]
     struct TestBus {
         bytes: Vec<u8>,
+        pending_interrupts: InterruptSet,
     }
 
     impl TestBus {
         fn new(size: usize) -> Self {
             Self {
                 bytes: vec![0; size],
+                pending_interrupts: InterruptSet::empty(),
             }
         }
 
@@ -613,6 +643,10 @@ mod tests {
                 .ok_or(BusError::UnmappedAddress { addr })?;
             *slot = value;
             Ok(())
+        }
+
+        fn pending_interrupts(&self) -> InterruptSet {
+            self.pending_interrupts
         }
     }
 
@@ -1597,6 +1631,113 @@ mod tests {
             0x4000
         );
         assert_eq!(core.stats().trap_count, 1);
+    }
+
+    #[test]
+    fn wfi_halts_until_interrupt_then_enters_machine_handler() {
+        let mut bus = TestBus::new(128);
+        bus.load_program(&[encode_wfi(), encode_addi(1, 0, 1), encode_jal(0, 0)]);
+        bus.store_words(0x0020, &[encode_addi(10, 0, 7), encode_jal(0, 0)]);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("pipeline should retire wfi before halting");
+            if core.hart_state().halted {
+                break;
+            }
+        }
+
+        assert!(core.hart_state().halted);
+        assert_eq!(core.hart_state().pc, 4);
+
+        let halted_cycle = core
+            .step_cycle(&mut bus)
+            .expect("halted pipeline should stall without interrupts");
+        assert_eq!(halted_cycle.retired_instructions, 0);
+        assert!(halted_cycle.stalled);
+        assert_eq!(core.hart_state().registers.read(10), 0);
+
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::MachineSoftware);
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("interrupt should wake halted pipeline");
+            if core.hart_state().registers.read(10) == 7 {
+                break;
+            }
+        }
+
+        assert!(!core.hart_state().halted);
+        assert_eq!(core.hart_state().registers.read(10), 7);
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 4);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            (1_u32 << 31) | 3
+        );
+        assert_eq!(core.stats().trap_count, 1);
+    }
+
+    #[test]
+    fn supervisor_wfi_traps_when_tw_is_set() {
+        let mut bus = TestBus::new(128);
+        bus.store_words(
+            0x0000,
+            &[
+                encode_wfi(),
+                encode_jal(0, 0),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                encode_jal(0, 0),
+            ],
+        );
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 21);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("tw-gated supervisor wfi should trap through pipeline");
+        }
+
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 0);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            2
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            encode_wfi()
+        );
+        assert!(!core.hart_state().halted);
+        assert_eq!(core.stats().trap_count, 1);
+        assert_eq!(core.stats().trap_flushes, 1);
     }
 
     #[test]
@@ -2810,6 +2951,10 @@ mod tests {
         let imm_low = (imm & 0x1f) << 7;
         let imm_high = ((imm >> 5) & 0x7f) << 25;
         imm_high | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | (0b010 << 12) | imm_low | 0b0100011
+    }
+
+    fn encode_wfi() -> u32 {
+        0x1050_0073
     }
 
     fn encode_beq(rs1: u8, rs2: u8, imm: i16) -> u32 {

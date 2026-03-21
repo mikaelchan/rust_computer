@@ -205,6 +205,22 @@ pub fn execute(
                 next_pc,
             })
         }
+        InstructionKind::System(SystemKind::Wfi) => {
+            if !matches!(privilege, PrivilegeMode::Machine) && csrs.tw_enabled() {
+                return ExecuteEvent::Trap(Trap::Exception(Exception::IllegalInstruction {
+                    instruction: decoded.raw.0,
+                }));
+            }
+
+            ExecuteEvent::Advance(ExecuteOutcome {
+                writeback_value: None,
+                csr_write: None,
+                translation_fence: None,
+                memory_address: None,
+                store_value: 0,
+                next_pc,
+            })
+        }
         InstructionKind::System(SystemKind::Mret) => {
             if !matches!(privilege, PrivilegeMode::Machine) {
                 return ExecuteEvent::Trap(Trap::Exception(Exception::IllegalInstruction {

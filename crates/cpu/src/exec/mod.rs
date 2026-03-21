@@ -257,6 +257,19 @@ pub fn execute_decoded(
             ));
             state.pc = next_pc;
         }
+        InstructionKind::System(SystemKind::Wfi) => {
+            if !matches!(state.privilege, PrivilegeMode::Machine) && state.csrs.tw_enabled() {
+                return Ok(apply_trap(
+                    state,
+                    Trap::Exception(Exception::IllegalInstruction {
+                        instruction: decoded.raw.0,
+                    }),
+                    current_pc,
+                ));
+            }
+            state.pc = next_pc;
+            state.halted = true;
+        }
         InstructionKind::System(SystemKind::Mret) => {
             if !matches!(state.privilege, PrivilegeMode::Machine) {
                 return Ok(apply_trap(
@@ -295,6 +308,7 @@ pub fn apply_trap(state: &mut HartState, trap: Trap, current_pc: u32) -> Executi
     let (privilege, trap_vector) = state.csrs.enter_trap(trap, current_pc, state.privilege);
     state.privilege = privilege;
     state.pc = trap_vector;
+    state.halted = false;
 
     ExecutionResult {
         retired: 0,
@@ -308,12 +322,13 @@ pub fn return_from_trap(state: &mut HartState, kind: SystemKind) -> ExecutionRes
     let (privilege, next_pc) = match kind {
         SystemKind::Mret => state.csrs.return_from_machine_trap(),
         SystemKind::Sret => state.csrs.return_from_supervisor_trap(),
-        SystemKind::Ecall | SystemKind::Ebreak | SystemKind::SfenceVma => {
+        SystemKind::Ecall | SystemKind::Ebreak | SystemKind::SfenceVma | SystemKind::Wfi => {
             unreachable!("only xret instructions may return from traps")
         }
     };
     state.privilege = privilege;
     state.pc = next_pc;
+    state.halted = false;
 
     ExecutionResult {
         retired: 1,
