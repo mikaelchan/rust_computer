@@ -8,9 +8,15 @@ use rvsim_isa::SystemKind;
 pub fn write_back(state: &mut HartState, payload: MemWbPayload) -> CommitEvent {
     let next_pc = if matches!(
         payload.decoded.kind,
-        rvsim_isa::InstructionKind::System(SystemKind::Mret)
+        rvsim_isa::InstructionKind::System(SystemKind::Mret | SystemKind::Sret)
     ) {
-        let _result = return_from_trap(state);
+        let system_kind = match payload.decoded.kind {
+            rvsim_isa::InstructionKind::System(kind @ (SystemKind::Mret | SystemKind::Sret)) => {
+                kind
+            }
+            _ => unreachable!("xret path should only execute for xret instructions"),
+        };
+        let _result = return_from_trap(state, system_kind);
         state.pc
     } else {
         if let Some(write) = payload.csr_write {

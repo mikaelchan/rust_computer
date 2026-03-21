@@ -64,8 +64,11 @@ The current baseline already has:
 
 ## CPU And Privilege
 
-- [ ] Extend privilege support beyond machine mode.
-  Supervisor mode, trap delegation, and a cleaner privilege model are natural next steps once the memory system is more mature.
+- [x] Add the first supervisor-mode privilege slice.
+  The CPU now models supervisor trap CSRs, `sret`, synchronous exception delegation through `medeleg`, and CSR privilege checks across both the reference and pipeline cores.
+
+- [ ] Extend privilege support beyond the first supervisor slice.
+  Supervisor interrupt delegation and delivery, fuller privileged CSR semantics, and real `satp`-driven translation remain future work.
 
 - [ ] Add virtual memory support.
   A future MMU/TLB implementation should come after the cache/memory hierarchy is stable enough to study address translation interactions cleanly.

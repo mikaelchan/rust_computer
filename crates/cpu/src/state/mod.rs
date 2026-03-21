@@ -2,7 +2,7 @@ mod csr_file;
 mod privilege;
 mod registers;
 
-pub use csr_file::{CsrFile, MachineCsrs};
+pub use csr_file::{CsrFile, MachineCsrs, SupervisorCsrs};
 pub use privilege::PrivilegeMode;
 pub use registers::RegisterFile;
 
@@ -29,6 +29,7 @@ impl HartState {
             halted: false,
         };
         state.csrs.write(rvsim_isa::CsrAddress::Mtvec, reset_vector);
+        state.csrs.write(rvsim_isa::CsrAddress::Stvec, reset_vector);
         state
     }
 
@@ -38,6 +39,7 @@ impl HartState {
         self.registers = RegisterFile::default();
         self.csrs = CsrFile::default();
         self.csrs.write(rvsim_isa::CsrAddress::Mtvec, reset_vector);
+        self.csrs.write(rvsim_isa::CsrAddress::Stvec, reset_vector);
         self.privilege = PrivilegeMode::Machine;
         self.halted = false;
     }

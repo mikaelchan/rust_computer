@@ -2,7 +2,7 @@ use rvsim_isa::{AluOp, DecodedInstruction, Exception, SystemKind, Trap, opcode::
 
 use crate::{
     exec::{alu, branch, csr, load_store},
-    state::CsrFile,
+    state::{CsrFile, PrivilegeMode},
 };
 
 /// Result produced by the execute stage before any memory access occurs.
@@ -60,7 +60,7 @@ pub fn execute(
     decoded: DecodedInstruction,
     rs1_value: u32,
     rs2_value: u32,
-    mepc: u32,
+    privilege: PrivilegeMode,
     csrs: &CsrFile,
 ) -> ExecuteEvent {
     let next_pc = decoded.pc.wrapping_add(4);
@@ -134,6 +134,14 @@ pub fn execute(
             next_pc,
         }),
         InstructionKind::Csr(_op) => {
+            let csr = decoded
+                .csr
+                .expect("csr instruction should provide an address");
+            if !csrs.allows_csr_access(privilege, csr) {
+                return ExecuteEvent::Trap(Trap::Exception(Exception::IllegalInstruction {
+                    instruction: decoded.raw.0,
+                }));
+            }
             let outcome = csr::execute(decoded, csrs, rs1_value)
                 .expect("csr instruction should provide an address");
             ExecuteEvent::Advance(ExecuteOutcome {
@@ -145,18 +153,45 @@ pub fn execute(
             })
         }
         InstructionKind::System(SystemKind::Ecall) => {
-            ExecuteEvent::Trap(Trap::Exception(Exception::EnvironmentCallFromMMode))
+            ExecuteEvent::Trap(Trap::Exception(match privilege {
+                PrivilegeMode::User => Exception::EnvironmentCallFromUMode,
+                PrivilegeMode::Supervisor => Exception::EnvironmentCallFromSMode,
+                PrivilegeMode::Machine => Exception::EnvironmentCallFromMMode,
+            }))
         }
         InstructionKind::System(SystemKind::Ebreak) => {
             ExecuteEvent::Trap(Trap::Exception(Exception::Breakpoint))
         }
-        InstructionKind::System(SystemKind::Mret) => ExecuteEvent::Advance(ExecuteOutcome {
-            writeback_value: None,
-            csr_write: None,
-            memory_address: None,
-            store_value: 0,
-            next_pc: mepc,
-        }),
+        InstructionKind::System(SystemKind::Mret) => {
+            if !matches!(privilege, PrivilegeMode::Machine) {
+                return ExecuteEvent::Trap(Trap::Exception(Exception::IllegalInstruction {
+                    instruction: decoded.raw.0,
+                }));
+            }
+
+            ExecuteEvent::Advance(ExecuteOutcome {
+                writeback_value: None,
+                csr_write: None,
+                memory_address: None,
+                store_value: 0,
+                next_pc: csrs.read(rvsim_isa::CsrAddress::Mepc),
+            })
+        }
+        InstructionKind::System(SystemKind::Sret) => {
+            if !matches!(privilege, PrivilegeMode::Supervisor) {
+                return ExecuteEvent::Trap(Trap::Exception(Exception::IllegalInstruction {
+                    instruction: decoded.raw.0,
+                }));
+            }
+
+            ExecuteEvent::Advance(ExecuteOutcome {
+                writeback_value: None,
+                csr_write: None,
+                memory_address: None,
+                store_value: 0,
+                next_pc: csrs.read(rvsim_isa::CsrAddress::Sepc),
+            })
+        }
     }
 }
 

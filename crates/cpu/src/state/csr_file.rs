@@ -3,21 +3,35 @@ use rvsim_system::{InterruptLine, InterruptSet};
 
 use super::PrivilegeMode;
 
+const MSTATUS_SIE: u32 = 1 << 1;
 const MSTATUS_MIE: u32 = 1 << 3;
+const MSTATUS_SPIE: u32 = 1 << 5;
 const MSTATUS_MPIE: u32 = 1 << 7;
+const MSTATUS_SPP: u32 = 1 << 8;
 const MSTATUS_MPP_SHIFT: u32 = 11;
 const MSTATUS_MPP_MASK: u32 = 0b11 << MSTATUS_MPP_SHIFT;
+const SSTATUS_MASK: u32 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP;
+const MIE_SSIE: u32 = 1 << 1;
 const MIE_MSIE: u32 = 1 << 3;
+const MIE_STIE: u32 = 1 << 5;
+const MIE_SEIE: u32 = 1 << 9;
 const MIE_MEIE: u32 = 1 << 11;
 const MIE_MTIE: u32 = 1 << 7;
+const SIE_MASK: u32 = MIE_SSIE | MIE_STIE | MIE_SEIE;
+const MIP_SSIP: u32 = 1 << 1;
 const MIP_MSIP: u32 = 1 << 3;
+const MIP_STIP: u32 = 1 << 5;
+const MIP_SEIP: u32 = 1 << 9;
 const MIP_MEIP: u32 = 1 << 11;
 const MIP_MTIP: u32 = 1 << 7;
+const SIP_MASK: u32 = MIP_SSIP | MIP_STIP | MIP_SEIP;
 
 /// Machine-mode CSR values required by the first milestone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MachineCsrs {
     pub mstatus: u32,
+    pub medeleg: u32,
+    pub mideleg: u32,
     pub mie: u32,
     pub mtvec: u32,
     pub mcycle: u32,
@@ -27,20 +41,41 @@ pub struct MachineCsrs {
     pub mip: u32,
 }
 
+/// Supervisor-visible trap and address-translation state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SupervisorCsrs {
+    pub stvec: u32,
+    pub sepc: u32,
+    pub scause: u32,
+    pub stval: u32,
+    pub satp: u32,
+}
+
 /// Storage wrapper for CSR reads and writes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CsrFile {
     machine: MachineCsrs,
+    supervisor: SupervisorCsrs,
 }
 
 impl CsrFile {
     #[must_use]
     pub fn read(&self, address: CsrAddress) -> u32 {
         match address {
+            CsrAddress::Sstatus => self.machine.mstatus & SSTATUS_MASK,
+            CsrAddress::Sie => self.machine.mie & SIE_MASK,
+            CsrAddress::Stvec => self.supervisor.stvec,
+            CsrAddress::Satp => self.supervisor.satp,
             CsrAddress::Mstatus => self.machine.mstatus,
+            CsrAddress::Medeleg => self.machine.medeleg,
+            CsrAddress::Mideleg => self.machine.mideleg,
             CsrAddress::Mie => self.machine.mie,
             CsrAddress::Mtvec => self.machine.mtvec,
             CsrAddress::Mcycle => self.machine.mcycle,
+            CsrAddress::Sepc => self.supervisor.sepc,
+            CsrAddress::Scause => self.supervisor.scause,
+            CsrAddress::Stval => self.supervisor.stval,
+            CsrAddress::Sip => self.machine.mip & SIP_MASK,
             CsrAddress::Mepc => self.machine.mepc,
             CsrAddress::Mcause => self.machine.mcause,
             CsrAddress::Mtval => self.machine.mtval,
@@ -50,10 +85,27 @@ impl CsrFile {
 
     pub fn write(&mut self, address: CsrAddress, value: u32) {
         match address {
+            CsrAddress::Sstatus => {
+                self.machine.mstatus =
+                    (self.machine.mstatus & !SSTATUS_MASK) | (value & SSTATUS_MASK);
+            }
+            CsrAddress::Sie => {
+                self.machine.mie = (self.machine.mie & !SIE_MASK) | (value & SIE_MASK);
+            }
+            CsrAddress::Stvec => self.supervisor.stvec = value,
+            CsrAddress::Satp => self.supervisor.satp = value,
             CsrAddress::Mstatus => self.machine.mstatus = value,
+            CsrAddress::Medeleg => self.machine.medeleg = value,
+            CsrAddress::Mideleg => self.machine.mideleg = value,
             CsrAddress::Mie => self.machine.mie = value,
             CsrAddress::Mtvec => self.machine.mtvec = value,
             CsrAddress::Mcycle => self.machine.mcycle = value,
+            CsrAddress::Sepc => self.supervisor.sepc = value,
+            CsrAddress::Scause => self.supervisor.scause = value,
+            CsrAddress::Stval => self.supervisor.stval = value,
+            CsrAddress::Sip => {
+                self.machine.mip = (self.machine.mip & !SIP_MASK) | (value & SIP_MASK);
+            }
             CsrAddress::Mepc => self.machine.mepc = value,
             CsrAddress::Mcause => self.machine.mcause = value,
             CsrAddress::Mtval => self.machine.mtval = value,
@@ -64,6 +116,11 @@ impl CsrFile {
     #[must_use]
     pub fn machine(&self) -> &MachineCsrs {
         &self.machine
+    }
+
+    #[must_use]
+    pub fn supervisor(&self) -> &SupervisorCsrs {
+        &self.supervisor
     }
 
     pub fn increment_cycle(&mut self) {
@@ -140,17 +197,31 @@ impl CsrFile {
         )
     }
 
-    /// Record machine-mode trap state and return the handler PC derived from `mtvec`.
     #[must_use]
-    pub fn enter_trap(
+    pub fn allows_csr_access(&self, privilege: PrivilegeMode, address: CsrAddress) -> bool {
+        privilege.csr_level() >= address.min_privilege_level()
+    }
+
+    fn delegates_trap_to_supervisor(&self, trap: Trap, current_privilege: PrivilegeMode) -> bool {
+        if matches!(current_privilege, PrivilegeMode::Machine) {
+            return false;
+        }
+
+        match trap {
+            Trap::Exception(_) => (self.machine.medeleg & (1 << trap.cause_code())) != 0,
+            Trap::Interrupt(_) => false,
+        }
+    }
+
+    fn enter_machine_trap(
         &mut self,
         trap: Trap,
         current_pc: u32,
         current_privilege: PrivilegeMode,
     ) -> u32 {
         self.machine.mepc = current_pc;
-        self.machine.mcause = trap.mcause();
-        self.machine.mtval = trap.mtval();
+        self.machine.mcause = trap.cause_bits();
+        self.machine.mtval = trap.tval();
 
         let mut mstatus = self.machine.mstatus;
         let mie = (mstatus & MSTATUS_MIE) != 0;
@@ -161,16 +232,67 @@ impl CsrFile {
 
         let base = self.machine.mtvec & !0b11;
         let mode = self.machine.mtvec & 0b11;
-        if matches!(trap, Trap::Interrupt(_)) && mode == 0b01 {
-            base.wrapping_add((trap.mcause() & 0x7fff_ffff) * 4)
+        if trap.is_interrupt() && mode == 0b01 {
+            base.wrapping_add(trap.cause_code() * 4)
         } else {
             base
         }
     }
 
-    /// Restore privilege state from `mstatus` and return the resume PC from `mepc`.
+    fn enter_supervisor_trap(
+        &mut self,
+        trap: Trap,
+        current_pc: u32,
+        current_privilege: PrivilegeMode,
+    ) -> u32 {
+        self.supervisor.sepc = current_pc;
+        self.supervisor.scause = trap.cause_bits();
+        self.supervisor.stval = trap.tval();
+
+        let mut mstatus = self.machine.mstatus;
+        let sie = (mstatus & MSTATUS_SIE) != 0;
+        mstatus = set_flag(mstatus, MSTATUS_SPIE, sie);
+        mstatus &= !MSTATUS_SIE;
+        mstatus = set_flag(
+            mstatus,
+            MSTATUS_SPP,
+            matches!(current_privilege, PrivilegeMode::Supervisor),
+        );
+        self.machine.mstatus = mstatus;
+
+        let base = self.supervisor.stvec & !0b11;
+        let mode = self.supervisor.stvec & 0b11;
+        if trap.is_interrupt() && mode == 0b01 {
+            base.wrapping_add(trap.cause_code() * 4)
+        } else {
+            base
+        }
+    }
+
+    /// Record trap state and return the target privilege plus trap vector.
     #[must_use]
-    pub fn return_from_trap(&mut self) -> (PrivilegeMode, u32) {
+    pub fn enter_trap(
+        &mut self,
+        trap: Trap,
+        current_pc: u32,
+        current_privilege: PrivilegeMode,
+    ) -> (PrivilegeMode, u32) {
+        if self.delegates_trap_to_supervisor(trap, current_privilege) {
+            (
+                PrivilegeMode::Supervisor,
+                self.enter_supervisor_trap(trap, current_pc, current_privilege),
+            )
+        } else {
+            (
+                PrivilegeMode::Machine,
+                self.enter_machine_trap(trap, current_pc, current_privilege),
+            )
+        }
+    }
+
+    /// Restore privilege state from `mstatus`/`mepc`.
+    #[must_use]
+    pub fn return_from_machine_trap(&mut self) -> (PrivilegeMode, u32) {
         let mut mstatus = self.machine.mstatus;
         let mpie = (mstatus & MSTATUS_MPIE) != 0;
         let mpp = (mstatus & MSTATUS_MPP_MASK) >> MSTATUS_MPP_SHIFT;
@@ -181,6 +303,28 @@ impl CsrFile {
         self.machine.mstatus = mstatus;
 
         (privilege_from_bits(mpp), self.machine.mepc)
+    }
+
+    /// Restore privilege state from `sstatus`/`sepc`.
+    #[must_use]
+    pub fn return_from_supervisor_trap(&mut self) -> (PrivilegeMode, u32) {
+        let mut mstatus = self.machine.mstatus;
+        let spie = (mstatus & MSTATUS_SPIE) != 0;
+        let spp = (mstatus & MSTATUS_SPP) != 0;
+
+        mstatus = set_flag(mstatus, MSTATUS_SIE, spie);
+        mstatus |= MSTATUS_SPIE;
+        mstatus &= !MSTATUS_SPP;
+        self.machine.mstatus = mstatus;
+
+        (
+            if spp {
+                PrivilegeMode::Supervisor
+            } else {
+                PrivilegeMode::User
+            },
+            self.supervisor.sepc,
+        )
     }
 }
 
@@ -206,10 +350,11 @@ const fn privilege_from_bits(bits: u32) -> PrivilegeMode {
 
 #[cfg(test)]
 mod tests {
-    use rvsim_isa::{CsrAddress, Interrupt};
+    use rvsim_isa::{CsrAddress, Exception, Interrupt, Trap};
     use rvsim_system::{InterruptLine, InterruptSet};
 
     use super::CsrFile;
+    use crate::state::PrivilegeMode;
 
     #[test]
     fn syncs_pending_machine_interrupt_bits_from_interrupt_set() {
@@ -253,6 +398,55 @@ mod tests {
         assert_eq!(
             csrs.pending_machine_interrupt(),
             Some(Interrupt::MachineSoftware)
+        );
+    }
+
+    #[test]
+    fn delegated_user_ecall_enters_supervisor_trap_state() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Medeleg, 1 << 8);
+        csrs.write(CsrAddress::Stvec, 0x80);
+        csrs.write(CsrAddress::Sstatus, 1 << 1);
+
+        let (privilege, handler_pc) = csrs.enter_trap(
+            Trap::Exception(Exception::EnvironmentCallFromUMode),
+            0x24,
+            PrivilegeMode::User,
+        );
+
+        assert_eq!(privilege, PrivilegeMode::Supervisor);
+        assert_eq!(handler_pc, 0x80);
+        assert_eq!(csrs.read(CsrAddress::Sepc), 0x24);
+        assert_eq!(csrs.read(CsrAddress::Scause), 8);
+        assert_eq!(csrs.read(CsrAddress::Stval), 0);
+        assert_eq!(csrs.read(CsrAddress::Sstatus) & (1 << 5), 1 << 5);
+        assert_eq!(csrs.read(CsrAddress::Sstatus) & (1 << 1), 0);
+    }
+
+    #[test]
+    fn supervisor_return_restores_user_mode_and_sepc() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Sepc, 0x44);
+        csrs.write(CsrAddress::Sstatus, 1 << 5);
+
+        let (privilege, pc) = csrs.return_from_supervisor_trap();
+
+        assert_eq!(privilege, PrivilegeMode::User);
+        assert_eq!(pc, 0x44);
+        assert_eq!(csrs.read(CsrAddress::Sstatus) & (1 << 1), 1 << 1);
+        assert_eq!(csrs.read(CsrAddress::Sstatus) & (1 << 8), 0);
+    }
+
+    #[test]
+    fn sstatus_is_a_masked_view_of_mstatus() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mstatus, 0xffff_ffff);
+        csrs.write(CsrAddress::Sstatus, 0);
+
+        assert_eq!(csrs.read(CsrAddress::Sstatus), 0);
+        assert_eq!(
+            csrs.read(CsrAddress::Mstatus) & !super::SSTATUS_MASK,
+            !super::SSTATUS_MASK
         );
     }
 }

@@ -61,6 +61,7 @@ pub enum SystemKind {
     Ecall,
     Ebreak,
     Mret,
+    Sret,
 }
 
 /// High-level decoded instruction kind.

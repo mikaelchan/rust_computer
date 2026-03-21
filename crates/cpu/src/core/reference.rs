@@ -161,9 +161,15 @@ mod tests {
     use crate::core::CpuModel;
     use crate::state::RegisterFile;
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct TinyBus {
-        bytes: [u8; 16],
+        bytes: [u8; 128],
+    }
+
+    impl Default for TinyBus {
+        fn default() -> Self {
+            Self { bytes: [0; 128] }
+        }
     }
 
     impl TinyBus {
@@ -267,6 +273,87 @@ mod tests {
         let state = core.hart_state();
         assert_eq!(state.registers.read(1), 0);
         assert_eq!(state.csrs.read(rvsim_isa::CsrAddress::Mtvec), 7);
+    }
+
+    #[test]
+    fn delegates_user_ecall_to_supervisor_handler_and_returns_with_sret() {
+        let mut bus = TinyBus::default();
+        bus.load_program(&[
+            encode_ecall(),
+            encode_addi(1, 0, 1),
+            encode_jal(0, 0),
+            0,
+            0,
+            0,
+            0,
+            0,
+            encode_csrrwi(0, rvsim_isa::CsrAddress::Sepc as u16, 4),
+            encode_addi(2, 0, 7),
+            encode_sret(),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Medeleg, 1 << 8);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x20);
+
+        for _ in 0..6 {
+            core.step_cycle(&mut bus)
+                .expect("delegated supervisor trap flow should execute");
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 1);
+        assert_eq!(core.hart_state().registers.read(2), 7);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::User
+        );
+        assert_eq!(core.hart_state().pc, 8);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Scause),
+            8
+        );
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sepc), 4);
+    }
+
+    #[test]
+    fn user_mode_machine_csr_access_traps_as_illegal_instruction() {
+        let instruction = encode_csrrwi(1, rvsim_isa::CsrAddress::Mstatus as u16, 1);
+        let mut bus = TinyBus::default();
+        bus.load_program(&[instruction]);
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        let cycle = core
+            .step_cycle(&mut bus)
+            .expect("illegal csr access should trap");
+
+        assert_eq!(cycle.retired_instructions, 0);
+        assert!(cycle.stalled);
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 0);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            2
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            instruction
+        );
     }
 
     #[test]
@@ -672,11 +759,19 @@ mod tests {
             | 0b1110011
     }
 
+    fn encode_ecall() -> u32 {
+        0x0000_0073
+    }
+
     fn encode_addi(rd: u8, rs1: u8, imm: i16) -> u32 {
         (((imm as u16 as u32) & 0x0fff) << 20)
             | ((rs1 as u32) << 15)
             | ((rd as u32) << 7)
             | 0b0010011
+    }
+
+    fn encode_sret() -> u32 {
+        0x1020_0073
     }
 
     fn encode_lui(rd: u8, upper_20: u32) -> u32 {

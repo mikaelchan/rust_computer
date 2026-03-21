@@ -18,6 +18,8 @@ pub enum Exception {
     Breakpoint,
     LoadAddressMisaligned { addr: u32 },
     StoreAddressMisaligned { addr: u32 },
+    EnvironmentCallFromUMode,
+    EnvironmentCallFromSMode,
     EnvironmentCallFromMMode,
 }
 
@@ -30,28 +32,43 @@ pub enum Trap {
 
 impl Trap {
     #[must_use]
-    pub const fn mcause(self) -> u32 {
+    pub const fn is_interrupt(self) -> bool {
+        matches!(self, Self::Interrupt(_))
+    }
+
+    #[must_use]
+    pub const fn cause_code(self) -> u32 {
         match self {
-            Self::Interrupt(Interrupt::MachineSoftware) => (1_u32 << 31) | 3,
+            Self::Interrupt(Interrupt::MachineSoftware) => 3,
             Self::Exception(Exception::InstructionAddressMisaligned { .. }) => 0,
             Self::Exception(Exception::IllegalInstruction { .. }) => 2,
             Self::Exception(Exception::Breakpoint) => 3,
             Self::Exception(Exception::LoadAddressMisaligned { .. }) => 4,
             Self::Exception(Exception::StoreAddressMisaligned { .. }) => 6,
+            Self::Exception(Exception::EnvironmentCallFromUMode) => 8,
+            Self::Exception(Exception::EnvironmentCallFromSMode) => 9,
             Self::Exception(Exception::EnvironmentCallFromMMode) => 11,
-            Self::Interrupt(Interrupt::MachineTimer) => (1_u32 << 31) | 7,
-            Self::Interrupt(Interrupt::MachineExternal) => (1_u32 << 31) | 11,
+            Self::Interrupt(Interrupt::MachineTimer) => 7,
+            Self::Interrupt(Interrupt::MachineExternal) => 11,
         }
     }
 
     #[must_use]
-    pub const fn mtval(self) -> u32 {
+    pub const fn cause_bits(self) -> u32 {
+        let interrupt_bit = if self.is_interrupt() { 1 << 31 } else { 0 };
+        self.cause_code() | interrupt_bit
+    }
+
+    #[must_use]
+    pub const fn tval(self) -> u32 {
         match self {
             Self::Exception(Exception::InstructionAddressMisaligned { addr }) => addr,
             Self::Exception(Exception::IllegalInstruction { instruction }) => instruction,
             Self::Exception(Exception::LoadAddressMisaligned { addr }) => addr,
             Self::Exception(Exception::StoreAddressMisaligned { addr }) => addr,
             Self::Exception(Exception::Breakpoint)
+            | Self::Exception(Exception::EnvironmentCallFromUMode)
+            | Self::Exception(Exception::EnvironmentCallFromSMode)
             | Self::Exception(Exception::EnvironmentCallFromMMode)
             | Self::Interrupt(_) => 0,
         }

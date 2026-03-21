@@ -1,4 +1,4 @@
-use rvsim_isa::{CsrAddress, Exception, Trap, opcode::InstructionKind};
+use rvsim_isa::{Exception, Trap, opcode::InstructionKind};
 use rvsim_system::{Bus, BusError, CpuCycle, Processor, SimComponent};
 
 use crate::{
@@ -260,7 +260,7 @@ impl Processor for PipelineCore {
                     payload.decoded,
                     rs1_value,
                     rs2_value,
-                    self.state.csrs.read(CsrAddress::Mepc),
+                    self.state.privilege,
                     &self.state.csrs,
                 ) {
                     ExecuteEvent::Advance(outcome) => {
@@ -279,7 +279,9 @@ impl Processor for PipelineCore {
                             flush_reason = Some(
                                 if matches!(
                                     payload.decoded.kind,
-                                    InstructionKind::System(rvsim_isa::SystemKind::Mret)
+                                    InstructionKind::System(
+                                        rvsim_isa::SystemKind::Mret | rvsim_isa::SystemKind::Sret
+                                    )
                                 ) {
                                     FlushReason::ReturnFromTrap
                                 } else {
@@ -288,9 +290,11 @@ impl Processor for PipelineCore {
                             );
                             note = if matches!(
                                 payload.decoded.kind,
-                                InstructionKind::System(rvsim_isa::SystemKind::Mret)
+                                InstructionKind::System(
+                                    rvsim_isa::SystemKind::Mret | rvsim_isa::SystemKind::Sret
+                                )
                             ) {
-                                "mret"
+                                "xret"
                             } else {
                                 "branch flush"
                             };
@@ -675,6 +679,136 @@ mod tests {
 
         assert_eq!(core.hart_state().registers.read(1), 0);
         assert_eq!(core.hart_state().registers.read(2), 7);
+    }
+
+    #[test]
+    fn sret_restores_execution_from_sepc() {
+        let mut bus = TestBus::new(128);
+        bus.load_program(&[
+            encode_sret(),
+            encode_addi(1, 0, 99),
+            encode_addi(2, 0, 7),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sepc, 8);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sstatus, 1 << 5);
+
+        for _ in 0..10 {
+            core.step_cycle(&mut bus)
+                .expect("pipeline cycle should work");
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().registers.read(2), 7);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::User
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sstatus) & (1 << 1),
+            1 << 1
+        );
+        assert_eq!(core.stats().return_flushes, 1);
+    }
+
+    #[test]
+    fn delegates_user_ecall_to_supervisor_handler_and_returns_with_sret() {
+        let mut bus = TestBus::new(128);
+        bus.load_program(&[
+            encode_ecall(),
+            encode_addi(1, 0, 1),
+            encode_jal(0, 0),
+            0,
+            0,
+            0,
+            0,
+            0,
+            encode_csrrwi(0, rvsim_isa::CsrAddress::Sepc as u16, 4),
+            encode_addi(2, 0, 7),
+            encode_sret(),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Medeleg, 1 << 8);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x20);
+
+        for _ in 0..16 {
+            core.step_cycle(&mut bus)
+                .expect("pipeline delegated supervisor trap flow should execute");
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 1);
+        assert_eq!(core.hart_state().registers.read(2), 7);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::User
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Scause),
+            8
+        );
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sepc), 4);
+        assert_eq!(core.stats().trap_count, 1);
+        assert_eq!(core.stats().trap_flushes, 1);
+        assert_eq!(core.stats().return_flushes, 1);
+    }
+
+    #[test]
+    fn user_mode_machine_csr_access_traps_as_illegal_instruction() {
+        let instruction = encode_csrrwi(1, rvsim_isa::CsrAddress::Mstatus as u16, 1);
+        let mut bus = TestBus::new(64);
+        bus.load_program(&[
+            instruction,
+            encode_jal(0, 0),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("illegal csr access should trap through pipeline");
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 0);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            2
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            instruction
+        );
+        assert_eq!(core.stats().trap_count, 1);
     }
 
     #[test]
@@ -1144,6 +1278,10 @@ mod tests {
         bit20 | bits19_12 | bit11 | bits10_1 | ((rd as u32) << 7) | 0b1101111
     }
 
+    fn encode_ecall() -> u32 {
+        0x0000_0073
+    }
+
     fn encode_i(imm: i16, rs1: u8, funct3: u32, rd: u8, opcode: u32) -> u32 {
         (((imm as u16 as u32) & 0x0fff) << 20)
             | ((rs1 as u32) << 15)
@@ -1171,5 +1309,9 @@ mod tests {
             | (0b101 << 12)
             | ((rd as u32) << 7)
             | 0b1110011
+    }
+
+    fn encode_sret() -> u32 {
+        0x1020_0073
     }
 }

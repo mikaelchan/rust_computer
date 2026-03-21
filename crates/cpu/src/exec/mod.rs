@@ -145,6 +145,18 @@ pub fn execute_decoded(
             state.pc = next_pc;
         }
         InstructionKind::Csr(_op) => {
+            let csr = decoded
+                .csr
+                .expect("csr instruction should provide an address");
+            if !state.csrs.allows_csr_access(state.privilege, csr) {
+                return Ok(apply_trap(
+                    state,
+                    Trap::Exception(Exception::IllegalInstruction {
+                        instruction: decoded.raw.0,
+                    }),
+                    current_pc,
+                ));
+            }
             let outcome = csr::execute(decoded, &state.csrs, rs1_value)
                 .expect("csr instruction should provide an address");
             write_rd(state, decoded.rd, outcome.read_value);
@@ -156,7 +168,7 @@ pub fn execute_decoded(
         InstructionKind::System(SystemKind::Ecall) => {
             return Ok(apply_trap(
                 state,
-                Trap::Exception(Exception::EnvironmentCallFromMMode),
+                Trap::Exception(ecall_exception(state.privilege)),
                 current_pc,
             ));
         }
@@ -168,7 +180,28 @@ pub fn execute_decoded(
             ));
         }
         InstructionKind::System(SystemKind::Mret) => {
-            return Ok(return_from_trap(state));
+            if !matches!(state.privilege, PrivilegeMode::Machine) {
+                return Ok(apply_trap(
+                    state,
+                    Trap::Exception(Exception::IllegalInstruction {
+                        instruction: decoded.raw.0,
+                    }),
+                    current_pc,
+                ));
+            }
+            return Ok(return_from_trap(state, SystemKind::Mret));
+        }
+        InstructionKind::System(SystemKind::Sret) => {
+            if !matches!(state.privilege, PrivilegeMode::Supervisor) {
+                return Ok(apply_trap(
+                    state,
+                    Trap::Exception(Exception::IllegalInstruction {
+                        instruction: decoded.raw.0,
+                    }),
+                    current_pc,
+                ));
+            }
+            return Ok(return_from_trap(state, SystemKind::Sret));
         }
     }
 
@@ -181,8 +214,8 @@ pub fn execute_decoded(
 
 /// Apply a trap to machine CSRs and redirect the hart to `mtvec`.
 pub fn apply_trap(state: &mut HartState, trap: Trap, current_pc: u32) -> ExecutionResult {
-    let trap_vector = state.csrs.enter_trap(trap, current_pc, state.privilege);
-    state.privilege = PrivilegeMode::Machine;
+    let (privilege, trap_vector) = state.csrs.enter_trap(trap, current_pc, state.privilege);
+    state.privilege = privilege;
     state.pc = trap_vector;
 
     ExecutionResult {
@@ -192,9 +225,15 @@ pub fn apply_trap(state: &mut HartState, trap: Trap, current_pc: u32) -> Executi
     }
 }
 
-/// Return from the current machine-mode trap context using `mepc`.
-pub fn return_from_trap(state: &mut HartState) -> ExecutionResult {
-    let (privilege, next_pc) = state.csrs.return_from_trap();
+/// Return from the current trap context using the privilege-specific epc CSR.
+pub fn return_from_trap(state: &mut HartState, kind: SystemKind) -> ExecutionResult {
+    let (privilege, next_pc) = match kind {
+        SystemKind::Mret => state.csrs.return_from_machine_trap(),
+        SystemKind::Sret => state.csrs.return_from_supervisor_trap(),
+        SystemKind::Ecall | SystemKind::Ebreak => {
+            unreachable!("only xret instructions may return from traps")
+        }
+    };
     state.privilege = privilege;
     state.pc = next_pc;
 
@@ -202,6 +241,14 @@ pub fn return_from_trap(state: &mut HartState) -> ExecutionResult {
         retired: 1,
         trap: None,
         memory_access: false,
+    }
+}
+
+const fn ecall_exception(privilege: PrivilegeMode) -> Exception {
+    match privilege {
+        PrivilegeMode::User => Exception::EnvironmentCallFromUMode,
+        PrivilegeMode::Supervisor => Exception::EnvironmentCallFromSMode,
+        PrivilegeMode::Machine => Exception::EnvironmentCallFromMMode,
     }
 }
 
