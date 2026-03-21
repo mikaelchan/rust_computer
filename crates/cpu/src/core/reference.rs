@@ -1258,6 +1258,120 @@ mod tests {
     }
 
     #[test]
+    fn machine_interrupt_preempts_supervisor_handler_and_returns_to_user() {
+        let mut bus = TinyBus::default();
+        bus.load_program(&[encode_addi(1, 0, 1), encode_jal(0, 0)]);
+        bus.store_words(
+            0x0020,
+            &[
+                encode_addi(10, 0, 10),
+                encode_addi(11, 0, 11),
+                encode_sret(),
+            ],
+        );
+        bus.store_words(0x0040, &[encode_addi(12, 0, 12), encode_mret()]);
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mideleg, 1 << 9);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sie, 1 << 9);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x20);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x40);
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::SupervisorExternal);
+
+        let first = core
+            .step_cycle(&mut bus)
+            .expect("delegated supervisor interrupt should trap first");
+        assert_eq!(first.retired_instructions, 0);
+        assert!(first.stalled);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Supervisor
+        );
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sepc), 0);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Scause),
+            (1_u32 << 31) | 9
+        );
+
+        bus.pending_interrupts = InterruptSet::empty();
+
+        core.step_cycle(&mut bus)
+            .expect("supervisor handler should execute first instruction");
+        assert_eq!(core.hart_state().registers.read(10), 10);
+        assert_eq!(core.hart_state().pc, 0x24);
+
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::MachineSoftware);
+
+        let nested = core
+            .step_cycle(&mut bus)
+            .expect("machine interrupt should preempt supervisor handler");
+        assert_eq!(nested.retired_instructions, 0);
+        assert!(nested.stalled);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().pc, 0x40);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc),
+            0x24
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            (1_u32 << 31) | 3
+        );
+
+        bus.pending_interrupts = InterruptSet::empty();
+
+        core.step_cycle(&mut bus)
+            .expect("machine handler body should execute");
+        assert_eq!(core.hart_state().registers.read(12), 12);
+        assert_eq!(core.hart_state().pc, 0x44);
+
+        core.step_cycle(&mut bus)
+            .expect("mret should return into supervisor handler");
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Supervisor
+        );
+        assert_eq!(core.hart_state().pc, 0x24);
+
+        core.step_cycle(&mut bus)
+            .expect("supervisor handler should resume after nested machine interrupt");
+        assert_eq!(core.hart_state().registers.read(11), 11);
+        assert_eq!(core.hart_state().pc, 0x28);
+
+        core.step_cycle(&mut bus)
+            .expect("sret should return into user code");
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::User
+        );
+        assert_eq!(core.hart_state().pc, 0);
+
+        core.step_cycle(&mut bus)
+            .expect("user code should resume after nested handlers unwind");
+        assert_eq!(core.hart_state().registers.read(1), 1);
+        assert_eq!(core.hart_state().registers.read(10), 10);
+        assert_eq!(core.hart_state().registers.read(11), 11);
+        assert_eq!(core.hart_state().registers.read(12), 12);
+        assert_eq!(core.hart_state().pc, 4);
+    }
+
+    #[test]
     fn user_instret_access_traps_without_full_counteren_chain() {
         let instruction = encode_csrrs(1, rvsim_isa::CsrAddress::Instret as u16, 0);
         let mut bus = TinyBus::default();
@@ -2475,6 +2589,10 @@ mod tests {
 
     fn encode_sret() -> u32 {
         0x1020_0073
+    }
+
+    fn encode_mret() -> u32 {
+        0x3020_0073
     }
 
     fn encode_wfi() -> u32 {
