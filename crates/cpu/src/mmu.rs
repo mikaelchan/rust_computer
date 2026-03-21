@@ -734,6 +734,34 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_superpage_translation_maps_data_from_root_leaf() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Satp, sv32_satp(0x2000));
+        install_sv32_superpage_mapping(
+            &mut bus,
+            0x2000,
+            0x400000,
+            0x000000,
+            PTE_R | PTE_W | PTE_X | PTE_A | PTE_D,
+        );
+
+        let translated = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x408123,
+                MemoryAccess::Load,
+            )
+            .expect("superpage translation should succeed");
+
+        assert_eq!(translated, TranslationResult::PhysicalAddress(0x8123));
+        assert_eq!(bus.load32_count, 1);
+    }
+
+    #[test]
     fn supervisor_cannot_access_user_page_without_sum_support() {
         let request = TranslationRequest {
             satp: 1 << SATP_MODE_SHIFT,
@@ -1121,6 +1149,20 @@ mod tests {
         bus.store_word(root_table + (vpn1 * 4), sv32_nonleaf(leaf_table));
         bus.store_word(
             leaf_table + (vpn0 * 4),
+            sv32_leaf(physical_page, flags | PTE_V),
+        );
+    }
+
+    fn install_sv32_superpage_mapping(
+        bus: &mut CountingBus,
+        root_table: u32,
+        virtual_page: u32,
+        physical_page: u32,
+        flags: u32,
+    ) {
+        let vpn1 = (virtual_page >> 22) & 0x3ff;
+        bus.store_word(
+            root_table + (vpn1 * 4),
             sv32_leaf(physical_page, flags | PTE_V),
         );
     }

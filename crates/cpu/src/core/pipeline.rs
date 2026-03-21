@@ -975,6 +975,43 @@ mod tests {
     }
 
     #[test]
+    fn executes_fetch_and_data_access_through_sv32_superpage() {
+        let mut bus = TestBus::new(0x10_000);
+        bus.store_words(
+            0x0000,
+            &[
+                encode_lui(1, 0x408),
+                encode_addi(2, 0, 9),
+                encode_sw(2, 1, 0),
+                encode_lw(3, 1, 0),
+                encode_jal(0, 0),
+            ],
+        );
+        install_sv32_superpage_mapping(
+            &mut bus,
+            0x2000,
+            0x400000,
+            0x000000,
+            PTE_R | PTE_W | PTE_X | PTE_A | PTE_D,
+        );
+
+        let mut core = PipelineCore::new(0x400000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+
+        for _ in 0..14 {
+            core.step_cycle(&mut bus)
+                .expect("sv32 superpage fetch/data flow should execute");
+        }
+
+        assert_eq!(core.hart_state().registers.read(3), 9);
+        assert_eq!(bus.read_word(0x8000), 9);
+        assert_eq!(core.hart_state().pc, 0x400010);
+    }
+
+    #[test]
     fn satp_write_switches_address_space() {
         let mut bus = TestBus::new(0x10_000);
         bus.store_words(
@@ -2190,6 +2227,20 @@ mod tests {
         bus.store_word(root_table + (vpn1 * 4), sv32_nonleaf(leaf_table));
         bus.store_word(
             leaf_table + (vpn0 * 4),
+            sv32_leaf(physical_page, flags | PTE_V),
+        );
+    }
+
+    fn install_sv32_superpage_mapping(
+        bus: &mut TestBus,
+        root_table: u32,
+        virtual_page: u32,
+        physical_page: u32,
+        flags: u32,
+    ) {
+        let vpn1 = (virtual_page >> 22) & 0x3ff;
+        bus.store_word(
+            root_table + (vpn1 * 4),
             sv32_leaf(physical_page, flags | PTE_V),
         );
     }
