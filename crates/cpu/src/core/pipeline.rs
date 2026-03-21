@@ -1,4 +1,4 @@
-use rvsim_isa::{Exception, Trap, opcode::InstructionKind};
+use rvsim_isa::{CsrAddress, DecodedInstruction, Exception, Trap, opcode::InstructionKind};
 use rvsim_system::{Bus, CpuCycle, Processor, SimComponent};
 
 use crate::{
@@ -31,6 +31,7 @@ pub struct PipelineCore {
     front_end_pc: u32,
     state: HartState,
     page_walker: PageWalker,
+    translation_barrier: bool,
     predictor: BimodalPredictor,
     latches: PipelineLatches,
     structural_hazards: StructuralHazardPolicy,
@@ -49,6 +50,7 @@ impl PipelineCore {
             front_end_pc: reset_vector,
             state: HartState::new(reset_vector),
             page_walker: PageWalker::default(),
+            translation_barrier: false,
             predictor: BimodalPredictor::default(),
             latches: PipelineLatches::default(),
             structural_hazards: StructuralHazardPolicy::default(),
@@ -137,6 +139,7 @@ impl SimComponent for PipelineCore {
         self.front_end_pc = self.reset_vector;
         self.state.reset(self.reset_vector);
         self.page_walker.reset();
+        self.translation_barrier = false;
         self.latches = PipelineLatches::default();
         self.last_commit = None;
         self.last_trace = PipelineTrace::default();
@@ -193,13 +196,22 @@ impl Processor for PipelineCore {
         let mut commit = None;
         let mut flush_reason = None;
         let mut memory_wait = false;
+        let mut translation_barrier = self.translation_barrier;
 
         if let Some(payload) = current.mem_wb.payload {
-            commit = Some(wb_stage::write_back(&mut self.state, payload));
+            commit = Some(wb_stage::write_back(
+                &mut self.state,
+                &mut self.page_walker,
+                payload,
+            ));
             retired_instructions += 1;
+            if is_translation_barrier_payload(payload.decoded, payload.csr_write) {
+                translation_barrier = false;
+            }
         }
 
-        if !bus.is_busy()
+        if !translation_barrier
+            && !bus.is_busy()
             && let Some(interrupt) = self.state.csrs.pending_interrupt(self.state.privilege)
         {
             let current_pc = self.state.pc;
@@ -251,7 +263,7 @@ impl Processor for PipelineCore {
             }
         }
 
-        if !flushed && !memory_wait {
+        if !flushed && !memory_wait && !translation_barrier {
             if let Some(payload) = current.id_ex.payload {
                 let rs1_value = self.forwarded_operand(
                     payload.decoded.rs1,
@@ -283,31 +295,40 @@ impl Processor for PipelineCore {
 
                         let flush_status =
                             detect_branch_flush(payload.predicted_pc, outcome.next_pc);
-                        if flush_status.flush_required {
+                        let translation_serializing =
+                            is_translation_barrier_payload(payload.decoded, outcome.csr_write);
+                        if translation_serializing || flush_status.flush_required {
                             flushed = true;
                             next_front_end_pc = outcome.next_pc;
-                            flush_reason = Some(
-                                if matches!(
+                            if translation_serializing {
+                                translation_barrier = true;
+                                flush_reason = Some(FlushReason::TranslationBarrier);
+                                note = "translation barrier";
+                            } else {
+                                flush_reason = Some(
+                                    if matches!(
+                                        payload.decoded.kind,
+                                        InstructionKind::System(
+                                            rvsim_isa::SystemKind::Mret
+                                                | rvsim_isa::SystemKind::Sret
+                                        )
+                                    ) {
+                                        FlushReason::ReturnFromTrap
+                                    } else {
+                                        FlushReason::BranchRedirect
+                                    },
+                                );
+                                note = if matches!(
                                     payload.decoded.kind,
                                     InstructionKind::System(
                                         rvsim_isa::SystemKind::Mret | rvsim_isa::SystemKind::Sret
                                     )
                                 ) {
-                                    FlushReason::ReturnFromTrap
+                                    "xret"
                                 } else {
-                                    FlushReason::BranchRedirect
-                                },
-                            );
-                            note = if matches!(
-                                payload.decoded.kind,
-                                InstructionKind::System(
-                                    rvsim_isa::SystemKind::Mret | rvsim_isa::SystemKind::Sret
-                                )
-                            ) {
-                                "xret"
-                            } else {
-                                "branch flush"
-                            };
+                                    "branch flush"
+                                };
+                            }
                         }
 
                         next.ex_mem.payload = Some(ExMemPayload {
@@ -330,7 +351,7 @@ impl Processor for PipelineCore {
             }
         }
 
-        if !flushed && !memory_wait {
+        if !flushed && !memory_wait && !translation_barrier {
             if let Some(payload) = current.if_id.payload {
                 match decode_stage(payload.raw, payload.pc) {
                     Ok(decoded) => {
@@ -404,12 +425,18 @@ impl Processor for PipelineCore {
                     }
                 }
             }
+        } else if !flushed && !memory_wait && translation_barrier {
+            fetch_stalled = true;
+            decode_stalled = current.if_id.payload.is_some();
+            next.if_id.payload = current.if_id.payload;
+            next.id_ex.payload = current.id_ex.payload;
+            note = "translation barrier";
         }
 
         if flushed {
             next.if_id.payload = None;
             next.id_ex.payload = None;
-        } else if !memory_wait && !decode_stalled && !fetch_stalled {
+        } else if !memory_wait && !decode_stalled && !fetch_stalled && !translation_barrier {
             let fetch_pc = next_front_end_pc;
             match if_stage::fetch(
                 bus,
@@ -470,6 +497,9 @@ impl Processor for PipelineCore {
                 FlushReason::BranchRedirect => self.stats.branch_flushes += 1,
                 FlushReason::Trap => self.stats.trap_flushes += 1,
                 FlushReason::ReturnFromTrap => self.stats.return_flushes += 1,
+                FlushReason::TranslationBarrier => {
+                    self.stats.translation_barrier_flushes += 1;
+                }
             }
         }
 
@@ -478,6 +508,7 @@ impl Processor for PipelineCore {
         }
 
         self.front_end_pc = next_front_end_pc;
+        self.translation_barrier = translation_barrier;
         self.latches = next;
         self.last_commit = commit;
         self.last_result = result;
@@ -504,6 +535,16 @@ impl Processor for PipelineCore {
             stalled: fetch_stalled || decode_stalled,
         })
     }
+}
+
+fn is_translation_barrier_payload(
+    decoded: DecodedInstruction,
+    csr_write: Option<crate::exec::csr::CsrWrite>,
+) -> bool {
+    matches!(
+        decoded.kind,
+        InstructionKind::System(rvsim_isa::SystemKind::SfenceVma)
+    ) || matches!(csr_write, Some(write) if write.address == CsrAddress::Satp)
 }
 
 #[cfg(test)]
@@ -779,6 +820,141 @@ mod tests {
 
         assert_eq!(core.hart_state().registers.read(3), 9);
         assert_eq!(bus.read_word(0x1000), 9);
+    }
+
+    #[test]
+    fn satp_write_switches_address_space_after_tlb_flush() {
+        let mut bus = TestBus::new(0x10_000);
+        bus.store_words(
+            0x0000,
+            &[
+                encode_lui(1, 0x8),
+                encode_lw(2, 1, 0),
+                encode_lui(3, 0x80000),
+                encode_addi(3, 3, 5),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Satp as u16, 3),
+                encode_lw(4, 1, 0),
+                encode_jal(0, 0),
+            ],
+        );
+        bus.store_word(0x1000, 5);
+        bus.store_word(0x7000, 9);
+
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x8000,
+            0x7000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        let mut core = PipelineCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+
+        for _ in 0..16 {
+            core.step_cycle(&mut bus)
+                .expect("satp switch should execute through pipeline");
+        }
+
+        assert_eq!(core.hart_state().registers.read(2), 5);
+        assert_eq!(core.hart_state().registers.read(4), 9);
+        assert_eq!(core.stats().translation_barrier_flushes, 1);
+    }
+
+    #[test]
+    fn sfence_vma_flushes_stale_translation() {
+        let mut bus = TestBus::new(0x10_000);
+        bus.store_words(
+            0x0000,
+            &[
+                encode_lui(1, 0x8),
+                encode_lw(2, 1, 0),
+                encode_addi(0, 0, 0),
+                encode_addi(0, 0, 0),
+                encode_sfence_vma(),
+                encode_lw(3, 1, 0),
+                encode_jal(0, 0),
+            ],
+        );
+        bus.store_word(0x1000, 5);
+        bus.store_word(0x2000, 9);
+
+        install_sv32_mapping(
+            &mut bus,
+            0x3000,
+            0x4000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x3000,
+            0x4000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        let mut core = PipelineCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x3000 >> 12));
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("first translated load should execute");
+            if core.hart_state().registers.read(2) == 5 {
+                break;
+            }
+        }
+        assert_eq!(core.hart_state().registers.read(2), 5);
+
+        install_sv32_mapping(
+            &mut bus,
+            0x3000,
+            0x4000,
+            0x8000,
+            0x2000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        for _ in 0..12 {
+            core.step_cycle(&mut bus)
+                .expect("sfence.vma flow should observe remapped page");
+        }
+
+        assert_eq!(core.hart_state().registers.read(3), 9);
+        assert_eq!(core.stats().translation_barrier_flushes, 1);
     }
 
     #[test]
@@ -1533,6 +1709,10 @@ mod tests {
         ((csr as u32) << 20) | ((rs1 as u32) << 15) | (0b010 << 12) | ((rd as u32) << 7) | 0b1110011
     }
 
+    fn encode_csrrw(rd: u8, csr: u16, rs1: u8) -> u32 {
+        ((csr as u32) << 20) | ((rs1 as u32) << 15) | (0b001 << 12) | ((rd as u32) << 7) | 0b1110011
+    }
+
     fn encode_csrrwi(rd: u8, csr: u16, zimm: u8) -> u32 {
         ((csr as u32) << 20)
             | ((zimm as u32) << 15)
@@ -1543,6 +1723,10 @@ mod tests {
 
     fn encode_sret() -> u32 {
         0x1020_0073
+    }
+
+    fn encode_sfence_vma() -> u32 {
+        0x1200_0073
     }
 
     fn install_sv32_mapping(

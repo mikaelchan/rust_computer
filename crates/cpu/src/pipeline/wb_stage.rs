@@ -1,11 +1,16 @@
 use crate::{
-    exec::return_from_trap, pipeline::latches::MemWbPayload, state::HartState, trace::CommitEvent,
+    exec::return_from_trap, mmu::PageWalker, pipeline::latches::MemWbPayload, state::HartState,
+    trace::CommitEvent,
 };
-use rvsim_isa::SystemKind;
+use rvsim_isa::{CsrAddress, SystemKind};
 
 /// Write one instruction result back to architectural state.
 #[must_use]
-pub fn write_back(state: &mut HartState, payload: MemWbPayload) -> CommitEvent {
+pub fn write_back(
+    state: &mut HartState,
+    walker: &mut PageWalker,
+    payload: MemWbPayload,
+) -> CommitEvent {
     let next_pc = if matches!(
         payload.decoded.kind,
         rvsim_isa::InstructionKind::System(SystemKind::Mret | SystemKind::Sret)
@@ -19,8 +24,18 @@ pub fn write_back(state: &mut HartState, payload: MemWbPayload) -> CommitEvent {
         let _result = return_from_trap(state, system_kind);
         state.pc
     } else {
+        if matches!(
+            payload.decoded.kind,
+            rvsim_isa::InstructionKind::System(SystemKind::SfenceVma)
+        ) {
+            walker.flush();
+        }
+
         if let Some(write) = payload.csr_write {
             state.csrs.write(write.address, write.value);
+            if write.address == CsrAddress::Satp {
+                walker.flush();
+            }
         }
 
         if let (Some(rd), Some(value)) = (payload.decoded.rd, payload.writeback_value) {

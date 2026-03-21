@@ -6,6 +6,9 @@ use crate::state::{CsrFile, PrivilegeMode};
 const PAGE_SHIFT: u32 = 12;
 const PAGE_SIZE: u32 = 1 << PAGE_SHIFT;
 const PAGE_OFFSET_MASK: u32 = PAGE_SIZE - 1;
+const SUPERPAGE_SHIFT: u32 = 22;
+const SUPERPAGE_SIZE: u32 = 1 << SUPERPAGE_SHIFT;
+const SUPERPAGE_OFFSET_MASK: u32 = SUPERPAGE_SIZE - 1;
 const SATP_MODE_SHIFT: u32 = 31;
 const SATP_MODE_SV32: u32 = 1;
 const SATP_PPN_MASK: u32 = (1 << 22) - 1;
@@ -18,6 +21,7 @@ const PTE_A: u32 = 1 << 6;
 const PTE_D: u32 = 1 << 7;
 const PTE_PPN_MASK: u32 = (1 << 22) - 1;
 const PTE_PPN0_MASK: u32 = (1 << 10) - 1;
+const TLB_ENTRY_COUNT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryAccess {
@@ -33,9 +37,11 @@ pub enum TranslationResult {
     PageFault(Trap),
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageWalker {
     active: Option<WalkState>,
+    tlb: [Option<TlbEntry>; TLB_ENTRY_COUNT],
+    next_tlb_entry: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +59,15 @@ struct TranslationRequest {
     access: MemoryAccess,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TlbEntry {
+    satp: u32,
+    virtual_base: u32,
+    physical_base: u32,
+    page_mask: u32,
+    flags: u32,
+}
+
 enum StepResult {
     Stall,
     Drained,
@@ -63,6 +78,12 @@ enum StepResult {
 impl PageWalker {
     pub fn reset(&mut self) {
         self.active = None;
+        self.flush();
+        self.next_tlb_entry = 0;
+    }
+
+    pub fn flush(&mut self) {
+        self.tlb = [None; TLB_ENTRY_COUNT];
     }
 
     pub fn translate(
@@ -74,11 +95,6 @@ impl PageWalker {
         access: MemoryAccess,
     ) -> Result<TranslationResult, BusError> {
         let satp = csrs.read(CsrAddress::Satp);
-        if !translation_enabled(satp, privilege) {
-            self.active = None;
-            return Ok(TranslationResult::PhysicalAddress(virtual_address));
-        }
-
         let request = TranslationRequest {
             satp,
             privilege,
@@ -97,7 +113,15 @@ impl PageWalker {
                 }
             }
 
+            if !translation_enabled(satp, privilege) {
+                return Ok(TranslationResult::PhysicalAddress(virtual_address));
+            }
+
             if self.active.is_none() {
+                if let Some(result) = self.lookup_tlb(request) {
+                    return Ok(result);
+                }
+
                 self.active = Some(WalkState {
                     request,
                     level: 1,
@@ -166,6 +190,9 @@ impl PageWalker {
                 });
             }
 
+            if !drain_only {
+                self.insert_tlb(state, flags, physical_address);
+            }
             self.active = None;
             return Ok(if drain_only {
                 StepResult::Drained
@@ -192,6 +219,58 @@ impl PageWalker {
             pte_address: next_table_base.wrapping_add(vpn_index * 4),
         });
         Ok(StepResult::Drained)
+    }
+
+    fn lookup_tlb(&self, request: TranslationRequest) -> Option<TranslationResult> {
+        let entry = self
+            .tlb
+            .iter()
+            .flatten()
+            .find(|entry| entry.matches(request))?;
+
+        if !permissions_allow(request, entry.flags) {
+            return Some(TranslationResult::PageFault(page_fault(request)));
+        }
+
+        Some(TranslationResult::PhysicalAddress(entry.translate(request)))
+    }
+
+    fn insert_tlb(&mut self, state: WalkState, flags: u32, physical_address: u32) {
+        let page_mask = match state.level {
+            1 => SUPERPAGE_OFFSET_MASK,
+            0 => PAGE_OFFSET_MASK,
+            _ => return,
+        };
+        let entry = TlbEntry {
+            satp: state.request.satp,
+            virtual_base: state.request.virtual_address & !page_mask,
+            physical_base: physical_address & !page_mask,
+            page_mask,
+            flags,
+        };
+        self.tlb[self.next_tlb_entry] = Some(entry);
+        self.next_tlb_entry = (self.next_tlb_entry + 1) % TLB_ENTRY_COUNT;
+    }
+}
+
+impl Default for PageWalker {
+    fn default() -> Self {
+        Self {
+            active: None,
+            tlb: [None; TLB_ENTRY_COUNT],
+            next_tlb_entry: 0,
+        }
+    }
+}
+
+impl TlbEntry {
+    const fn matches(self, request: TranslationRequest) -> bool {
+        self.satp == request.satp
+            && (request.virtual_address & !self.page_mask) == self.virtual_base
+    }
+
+    const fn translate(self, request: TranslationRequest) -> u32 {
+        self.physical_base | (request.virtual_address & self.page_mask)
     }
 }
 
@@ -282,6 +361,48 @@ const fn page_fault(request: TranslationRequest) -> Trap {
 mod tests {
     use super::*;
     use crate::state::PrivilegeMode;
+    use rvsim_system::BusError;
+
+    #[derive(Debug)]
+    struct CountingBus {
+        bytes: Vec<u8>,
+        load32_count: u32,
+    }
+
+    impl CountingBus {
+        fn new(size: usize) -> Self {
+            Self {
+                bytes: vec![0; size],
+                load32_count: 0,
+            }
+        }
+
+        fn store_word(&mut self, addr: u32, value: u32) {
+            let offset = addr as usize;
+            self.bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+
+        fn read_word(&self, addr: u32) -> u32 {
+            let offset = addr as usize;
+            u32::from_le_bytes(self.bytes[offset..offset + 4].try_into().unwrap_or([0; 4]))
+        }
+    }
+
+    impl Bus for CountingBus {
+        fn load8(&mut self, addr: u64) -> Result<u8, BusError> {
+            Ok(self.bytes[addr as usize])
+        }
+
+        fn store8(&mut self, addr: u64, value: u8) -> Result<(), BusError> {
+            self.bytes[addr as usize] = value;
+            Ok(())
+        }
+
+        fn load32(&mut self, addr: u64) -> Result<u32, BusError> {
+            self.load32_count += 1;
+            Ok(self.read_word(addr as u32))
+        }
+    }
 
     #[test]
     fn supervisor_translation_is_enabled_only_for_sv32() {
@@ -326,5 +447,112 @@ mod tests {
             request,
             PTE_V | PTE_R | PTE_U | PTE_A | PTE_D
         ));
+    }
+
+    #[test]
+    fn tlb_hit_reuses_completed_translation() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Satp, sv32_satp(0x2000));
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        let first = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("first translation should succeed");
+        let second = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("second translation should hit tlb");
+
+        assert_eq!(first, TranslationResult::PhysicalAddress(0x1123));
+        assert_eq!(second, TranslationResult::PhysicalAddress(0x1123));
+        assert_eq!(bus.load32_count, 2);
+    }
+
+    #[test]
+    fn flush_discards_cached_translation() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Satp, sv32_satp(0x2000));
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        let _ = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("first translation should succeed");
+        walker.flush();
+        let translated = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("translation after flush should refill tlb");
+
+        assert_eq!(translated, TranslationResult::PhysicalAddress(0x1123));
+        assert_eq!(bus.load32_count, 4);
+    }
+
+    fn install_sv32_mapping(
+        bus: &mut CountingBus,
+        root_table: u32,
+        leaf_table: u32,
+        virtual_page: u32,
+        physical_page: u32,
+        flags: u32,
+    ) {
+        let vpn1 = (virtual_page >> 22) & 0x3ff;
+        let vpn0 = (virtual_page >> 12) & 0x3ff;
+        bus.store_word(root_table + (vpn1 * 4), sv32_nonleaf(leaf_table));
+        bus.store_word(
+            leaf_table + (vpn0 * 4),
+            sv32_leaf(physical_page, flags | PTE_V),
+        );
+    }
+
+    const fn sv32_nonleaf(next_table: u32) -> u32 {
+        ((next_table >> 12) << 10) | PTE_V
+    }
+
+    const fn sv32_leaf(physical_page: u32, flags: u32) -> u32 {
+        ((physical_page >> 12) << 10) | flags
+    }
+
+    const fn sv32_satp(root_table: u32) -> u32 {
+        (SATP_MODE_SV32 << SATP_MODE_SHIFT) | (root_table >> 12)
     }
 }

@@ -60,6 +60,7 @@ pub enum CsrOp {
 pub enum SystemKind {
     Ecall,
     Ebreak,
+    SfenceVma,
     Mret,
     Sret,
 }

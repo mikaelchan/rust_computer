@@ -401,6 +401,138 @@ mod tests {
     }
 
     #[test]
+    fn satp_write_switches_address_space_after_tlb_flush() {
+        let mut bus = TinyBus::default();
+        bus.store_words(
+            0x0000,
+            &[
+                encode_lui(1, 0x8),
+                encode_lw(2, 1, 0),
+                encode_lui(3, 0x80000),
+                encode_addi(3, 3, 5),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Satp as u16, 3),
+                encode_lw(4, 1, 0),
+                encode_jal(0, 0),
+            ],
+        );
+        bus.store_word(0x1000, 5);
+        bus.store_word(0x7000, 9);
+
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x8000,
+            0x7000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        let mut core = ReferenceCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("satp switch should execute through reference core");
+        }
+
+        assert_eq!(core.hart_state().registers.read(2), 5);
+        assert_eq!(core.hart_state().registers.read(4), 9);
+    }
+
+    #[test]
+    fn sfence_vma_flushes_stale_translation() {
+        let mut bus = TinyBus::default();
+        bus.store_words(
+            0x0000,
+            &[
+                encode_lui(1, 0x8),
+                encode_lw(2, 1, 0),
+                encode_addi(0, 0, 0),
+                encode_addi(0, 0, 0),
+                encode_sfence_vma(),
+                encode_lw(3, 1, 0),
+                encode_jal(0, 0),
+            ],
+        );
+        bus.store_word(0x1000, 5);
+        bus.store_word(0x2000, 9);
+        install_sv32_mapping(
+            &mut bus,
+            0x3000,
+            0x4000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x3000,
+            0x4000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        let mut core = ReferenceCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x3000 >> 12));
+
+        for _ in 0..3 {
+            core.step_cycle(&mut bus)
+                .expect("first translated load should execute");
+            if core.hart_state().registers.read(2) == 5 {
+                break;
+            }
+        }
+        assert_eq!(core.hart_state().registers.read(2), 5);
+
+        install_sv32_mapping(
+            &mut bus,
+            0x3000,
+            0x4000,
+            0x8000,
+            0x2000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        for _ in 0..6 {
+            core.step_cycle(&mut bus)
+                .expect("sfence.vma flow should observe remapped page");
+        }
+
+        assert_eq!(core.hart_state().registers.read(3), 9);
+    }
+
+    #[test]
     fn traps_on_instruction_page_fault_during_sv32_fetch() {
         let mut bus = TinyBus::default();
         bus.store_words(0x0080, &[encode_addi(10, 0, 1), encode_jal(0, 0)]);
@@ -1003,6 +1135,10 @@ mod tests {
             | 0b1110011
     }
 
+    fn encode_csrrw(rd: u8, csr: u16, rs1: u8) -> u32 {
+        ((csr as u32) << 20) | ((rs1 as u32) << 15) | (0b001 << 12) | ((rd as u32) << 7) | 0b1110011
+    }
+
     fn encode_ecall() -> u32 {
         0x0000_0073
     }
@@ -1016,6 +1152,10 @@ mod tests {
 
     fn encode_sret() -> u32 {
         0x1020_0073
+    }
+
+    fn encode_sfence_vma() -> u32 {
+        0x1200_0073
     }
 
     const SATP_MODE_SV32: u32 = 1 << 31;

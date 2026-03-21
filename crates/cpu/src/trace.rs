@@ -19,6 +19,7 @@ pub enum FlushReason {
     BranchRedirect,
     Trap,
     ReturnFromTrap,
+    TranslationBarrier,
 }
 
 /// Cumulative pipeline counters useful for later benchmarking and debugging.
@@ -32,6 +33,7 @@ pub struct PipelineStats {
     pub branch_flushes: u64,
     pub trap_flushes: u64,
     pub return_flushes: u64,
+    pub translation_barrier_flushes: u64,
     pub predicted_taken_fetches: u64,
     pub trap_count: u64,
 }

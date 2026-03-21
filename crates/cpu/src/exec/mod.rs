@@ -6,7 +6,8 @@ pub mod csr;
 pub mod load_store;
 
 use rvsim_isa::{
-    DecodedInstruction, Exception, LoadKind, StoreKind, SystemKind, Trap, opcode::InstructionKind,
+    CsrAddress, DecodedInstruction, Exception, LoadKind, StoreKind, SystemKind, Trap,
+    opcode::InstructionKind,
 };
 use rvsim_system::{Bus, BusError};
 
@@ -206,6 +207,9 @@ pub fn execute_decoded(
             write_rd(state, decoded.rd, outcome.read_value);
             if let Some(write) = outcome.write {
                 state.csrs.write(write.address, write.value);
+                if write.address == CsrAddress::Satp {
+                    walker.flush();
+                }
             }
             state.pc = next_pc;
         }
@@ -222,6 +226,19 @@ pub fn execute_decoded(
                 Trap::Exception(Exception::Breakpoint),
                 current_pc,
             ));
+        }
+        InstructionKind::System(SystemKind::SfenceVma) => {
+            if matches!(state.privilege, PrivilegeMode::User) {
+                return Ok(apply_trap(
+                    state,
+                    Trap::Exception(Exception::IllegalInstruction {
+                        instruction: decoded.raw.0,
+                    }),
+                    current_pc,
+                ));
+            }
+            walker.flush();
+            state.pc = next_pc;
         }
         InstructionKind::System(SystemKind::Mret) => {
             if !matches!(state.privilege, PrivilegeMode::Machine) {
@@ -274,7 +291,7 @@ pub fn return_from_trap(state: &mut HartState, kind: SystemKind) -> ExecutionRes
     let (privilege, next_pc) = match kind {
         SystemKind::Mret => state.csrs.return_from_machine_trap(),
         SystemKind::Sret => state.csrs.return_from_supervisor_trap(),
-        SystemKind::Ecall | SystemKind::Ebreak => {
+        SystemKind::Ecall | SystemKind::Ebreak | SystemKind::SfenceVma => {
             unreachable!("only xret instructions may return from traps")
         }
     };
