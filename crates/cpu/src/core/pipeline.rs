@@ -1,5 +1,5 @@
 use rvsim_isa::{Exception, Trap, opcode::InstructionKind};
-use rvsim_system::{Bus, BusError, CpuCycle, Processor, SimComponent};
+use rvsim_system::{Bus, CpuCycle, Processor, SimComponent};
 
 use crate::{
     core::{CpuError, CpuModel},
@@ -9,10 +9,11 @@ use crate::{
         data::detect_raw_hazard,
         structural::{StructuralHazardPolicy, fetch_blocked_by_memory_access},
     },
+    mmu::PageWalker,
     pipeline::{
         ex_stage::{self, ExecuteEvent},
         id_stage::decode_stage,
-        if_stage::fetch,
+        if_stage::{self, FetchEvent},
         latches::{ExMemPayload, IdExPayload, MemWbPayload, PipelineLatches},
         mem_stage::{self, MemoryEvent},
         wb_stage,
@@ -29,6 +30,7 @@ pub struct PipelineCore {
     cycle: u64,
     front_end_pc: u32,
     state: HartState,
+    page_walker: PageWalker,
     predictor: BimodalPredictor,
     latches: PipelineLatches,
     structural_hazards: StructuralHazardPolicy,
@@ -46,6 +48,7 @@ impl PipelineCore {
             cycle: 0,
             front_end_pc: reset_vector,
             state: HartState::new(reset_vector),
+            page_walker: PageWalker::default(),
             predictor: BimodalPredictor::default(),
             latches: PipelineLatches::default(),
             structural_hazards: StructuralHazardPolicy::default(),
@@ -133,6 +136,7 @@ impl SimComponent for PipelineCore {
         self.cycle = 0;
         self.front_end_pc = self.reset_vector;
         self.state.reset(self.reset_vector);
+        self.page_walker.reset();
         self.latches = PipelineLatches::default();
         self.last_commit = None;
         self.last_trace = PipelineTrace::default();
@@ -217,7 +221,13 @@ impl Processor for PipelineCore {
                     ex_stage::uses_memory(payload.decoded),
                 );
 
-                match mem_stage::access(bus, payload)? {
+                match mem_stage::access(
+                    bus,
+                    &mut self.page_walker,
+                    &self.state.csrs,
+                    self.state.privilege,
+                    payload,
+                )? {
                     MemoryEvent::Advance(payload) => {
                         next.mem_wb.payload = Some(payload);
                     }
@@ -401,8 +411,15 @@ impl Processor for PipelineCore {
             next.id_ex.payload = None;
         } else if !memory_wait && !decode_stalled && !fetch_stalled {
             let fetch_pc = next_front_end_pc;
-            match fetch(bus, fetch_pc, &self.predictor) {
-                Ok(payload) => {
+            match if_stage::fetch(
+                bus,
+                &mut self.page_walker,
+                &self.state.csrs,
+                self.state.privilege,
+                fetch_pc,
+                &self.predictor,
+            )? {
+                FetchEvent::Advance(payload) => {
                     fetched_pc = Some(payload.pc);
                     predicted_taken = payload.predicted_taken;
                     next.if_id.payload = Some(payload);
@@ -411,24 +428,19 @@ impl Processor for PipelineCore {
                         note = "predicted taken";
                     }
                 }
-                Err(BusError::Busy { .. }) => {
+                FetchEvent::Stall => {
                     fetch_stalled = true;
                     if note == "progress" {
                         note = "fetch wait";
                     }
                 }
-                Err(BusError::MisalignedAccess { .. }) => {
-                    trap_result = Some(apply_trap(
-                        &mut self.state,
-                        Trap::Exception(Exception::InstructionAddressMisaligned { addr: fetch_pc }),
-                        fetch_pc,
-                    ));
+                FetchEvent::Trap(trap) => {
+                    trap_result = Some(apply_trap(&mut self.state, trap, fetch_pc));
                     next_front_end_pc = self.state.pc;
                     flushed = true;
                     flush_reason = Some(FlushReason::Trap);
-                    note = "instruction address misaligned";
+                    note = "fetch trap";
                 }
-                Err(error) => return Err(error.into()),
             }
         } else if fetch_stalled && note == "progress" {
             note = "structural hazard";
@@ -521,10 +533,24 @@ mod tests {
         }
 
         fn load_program(&mut self, program: &[u32]) {
-            for (index, word) in program.iter().copied().enumerate() {
-                let offset = index * 4;
+            self.store_words(0, program);
+        }
+
+        fn store_words(&mut self, base: u32, words: &[u32]) {
+            for (index, word) in words.iter().copied().enumerate() {
+                let offset = base as usize + index * 4;
                 self.bytes[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
             }
+        }
+
+        fn store_word(&mut self, addr: u32, word: u32) {
+            let offset = addr as usize;
+            self.bytes[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+
+        fn read_word(&self, addr: u32) -> u32 {
+            let offset = addr as usize;
+            u32::from_le_bytes(self.bytes[offset..offset + 4].try_into().unwrap_or([0; 4]))
         }
     }
 
@@ -680,6 +706,118 @@ mod tests {
 
         assert_eq!(core.hart_state().registers.read(1), 0);
         assert_eq!(core.hart_state().registers.read(2), 7);
+    }
+
+    #[test]
+    fn fetches_instructions_through_sv32_translation() {
+        let mut bus = TestBus::new(0x10_000);
+        bus.store_words(0x0000, &[encode_addi(1, 0, 5), encode_jal(0, 0)]);
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+
+        let mut core = PipelineCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("sv32 instruction fetch should execute");
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 5);
+        assert_eq!(core.hart_state().pc, 0x4004);
+    }
+
+    #[test]
+    fn executes_load_store_through_sv32_translation() {
+        let mut bus = TestBus::new(0x10_000);
+        bus.store_words(
+            0x0000,
+            &[
+                encode_lui(1, 0x8),
+                encode_addi(2, 0, 9),
+                encode_sw(2, 1, 0),
+                encode_lw(3, 1, 0),
+                encode_jal(0, 0),
+            ],
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_W | PTE_A | PTE_D,
+        );
+
+        let mut core = PipelineCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+
+        for _ in 0..14 {
+            core.step_cycle(&mut bus)
+                .expect("sv32 load/store flow should execute");
+        }
+
+        assert_eq!(core.hart_state().registers.read(3), 9);
+        assert_eq!(bus.read_word(0x1000), 9);
+    }
+
+    #[test]
+    fn traps_on_instruction_page_fault_during_sv32_fetch() {
+        let mut bus = TestBus::new(0x10_000);
+        bus.store_words(0x0080, &[encode_addi(10, 0, 1), encode_jal(0, 0)]);
+
+        let mut core = PipelineCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x80);
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("instruction page fault should trap through pipeline");
+        }
+
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().registers.read(10), 1);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            12
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc),
+            0x4000
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            0x4000
+        );
+        assert_eq!(core.stats().trap_count, 1);
     }
 
     #[test]
@@ -1362,6 +1500,14 @@ mod tests {
         bit20 | bits19_12 | bit11 | bits10_1 | ((rd as u32) << 7) | 0b1101111
     }
 
+    const SATP_MODE_SV32: u32 = 1 << 31;
+    const PTE_V: u32 = 1 << 0;
+    const PTE_R: u32 = 1 << 1;
+    const PTE_W: u32 = 1 << 2;
+    const PTE_X: u32 = 1 << 3;
+    const PTE_A: u32 = 1 << 6;
+    const PTE_D: u32 = 1 << 7;
+
     fn encode_ecall() -> u32 {
         0x0000_0073
     }
@@ -1397,5 +1543,30 @@ mod tests {
 
     fn encode_sret() -> u32 {
         0x1020_0073
+    }
+
+    fn install_sv32_mapping(
+        bus: &mut TestBus,
+        root_table: u32,
+        leaf_table: u32,
+        virtual_page: u32,
+        physical_page: u32,
+        flags: u32,
+    ) {
+        let vpn1 = (virtual_page >> 22) & 0x3ff;
+        let vpn0 = (virtual_page >> 12) & 0x3ff;
+        bus.store_word(root_table + (vpn1 * 4), sv32_nonleaf(leaf_table));
+        bus.store_word(
+            leaf_table + (vpn0 * 4),
+            sv32_leaf(physical_page, flags | PTE_V),
+        );
+    }
+
+    fn sv32_nonleaf(next_table: u32) -> u32 {
+        ((next_table >> 12) << 10) | PTE_V
+    }
+
+    fn sv32_leaf(physical_page: u32, flags: u32) -> u32 {
+        ((physical_page >> 12) << 10) | flags
     }
 }

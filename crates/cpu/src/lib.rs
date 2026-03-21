@@ -3,6 +3,7 @@
 pub mod core;
 pub mod exec;
 pub mod hazard;
+mod mmu;
 pub mod pipeline;
 pub mod predictor;
 pub mod state;

@@ -39,10 +39,13 @@ impl Interrupt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exception {
     InstructionAddressMisaligned { addr: u32 },
+    InstructionPageFault { addr: u32 },
     IllegalInstruction { instruction: u32 },
     Breakpoint,
     LoadAddressMisaligned { addr: u32 },
+    LoadPageFault { addr: u32 },
     StoreAddressMisaligned { addr: u32 },
+    StorePageFault { addr: u32 },
     EnvironmentCallFromUMode,
     EnvironmentCallFromSMode,
     EnvironmentCallFromMMode,
@@ -73,6 +76,9 @@ impl Trap {
             Self::Exception(Exception::EnvironmentCallFromUMode) => 8,
             Self::Exception(Exception::EnvironmentCallFromSMode) => 9,
             Self::Exception(Exception::EnvironmentCallFromMMode) => 11,
+            Self::Exception(Exception::InstructionPageFault { .. }) => 12,
+            Self::Exception(Exception::LoadPageFault { .. }) => 13,
+            Self::Exception(Exception::StorePageFault { .. }) => 15,
         }
     }
 
@@ -86,9 +92,12 @@ impl Trap {
     pub const fn tval(self) -> u32 {
         match self {
             Self::Exception(Exception::InstructionAddressMisaligned { addr }) => addr,
+            Self::Exception(Exception::InstructionPageFault { addr }) => addr,
             Self::Exception(Exception::IllegalInstruction { instruction }) => instruction,
             Self::Exception(Exception::LoadAddressMisaligned { addr }) => addr,
+            Self::Exception(Exception::LoadPageFault { addr }) => addr,
             Self::Exception(Exception::StoreAddressMisaligned { addr }) => addr,
+            Self::Exception(Exception::StorePageFault { addr }) => addr,
             Self::Exception(Exception::Breakpoint)
             | Self::Exception(Exception::EnvironmentCallFromUMode)
             | Self::Exception(Exception::EnvironmentCallFromSMode)

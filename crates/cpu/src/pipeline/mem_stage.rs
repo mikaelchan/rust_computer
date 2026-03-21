@@ -3,7 +3,9 @@ use rvsim_system::{Bus, BusError};
 
 use crate::{
     exec::load_store,
+    mmu::{MemoryAccess, PageWalker, TranslationResult},
     pipeline::latches::{ExMemPayload, MemWbPayload},
+    state::{CsrFile, PrivilegeMode},
 };
 
 /// Outcome of the memory stage.
@@ -15,11 +17,28 @@ pub enum MemoryEvent {
 }
 
 /// Perform memory access or pass through a non-memory instruction.
-pub fn access(bus: &mut dyn Bus, payload: ExMemPayload) -> Result<MemoryEvent, BusError> {
+pub fn access(
+    bus: &mut dyn Bus,
+    walker: &mut PageWalker,
+    csrs: &CsrFile,
+    privilege: PrivilegeMode,
+    payload: ExMemPayload,
+) -> Result<MemoryEvent, BusError> {
     match payload.decoded.kind {
         InstructionKind::Load(load_kind) => {
-            let address = u64::from(payload.memory_address.unwrap_or_default());
-            match load_value(bus, load_kind, address) {
+            let virtual_address = payload.memory_address.unwrap_or_default();
+            let physical_address = match walker.translate(
+                bus,
+                csrs,
+                privilege,
+                virtual_address,
+                MemoryAccess::Load,
+            )? {
+                TranslationResult::PhysicalAddress(physical_address) => physical_address,
+                TranslationResult::Stall => return Ok(MemoryEvent::Stall(payload)),
+                TranslationResult::PageFault(trap) => return Ok(MemoryEvent::Trap(trap)),
+            };
+            match load_value(bus, load_kind, u64::from(physical_address)) {
                 Ok(value) => Ok(MemoryEvent::Advance(MemWbPayload {
                     decoded: payload.decoded,
                     writeback_value: Some(value),
@@ -29,15 +48,31 @@ pub fn access(bus: &mut dyn Bus, payload: ExMemPayload) -> Result<MemoryEvent, B
                 Err(BusError::Busy { .. }) => Ok(MemoryEvent::Stall(payload)),
                 Err(BusError::MisalignedAccess { .. }) => Ok(MemoryEvent::Trap(Trap::Exception(
                     Exception::LoadAddressMisaligned {
-                        addr: address as u32,
+                        addr: virtual_address,
                     },
                 ))),
                 Err(error) => Err(error),
             }
         }
         InstructionKind::Store(store_kind) => {
-            let address = u64::from(payload.memory_address.unwrap_or_default());
-            match store_value(bus, store_kind, address, payload.store_value) {
+            let virtual_address = payload.memory_address.unwrap_or_default();
+            let physical_address = match walker.translate(
+                bus,
+                csrs,
+                privilege,
+                virtual_address,
+                MemoryAccess::Store,
+            )? {
+                TranslationResult::PhysicalAddress(physical_address) => physical_address,
+                TranslationResult::Stall => return Ok(MemoryEvent::Stall(payload)),
+                TranslationResult::PageFault(trap) => return Ok(MemoryEvent::Trap(trap)),
+            };
+            match store_value(
+                bus,
+                store_kind,
+                u64::from(physical_address),
+                payload.store_value,
+            ) {
                 Ok(()) => Ok(MemoryEvent::Advance(MemWbPayload {
                     decoded: payload.decoded,
                     writeback_value: None,
@@ -47,7 +82,7 @@ pub fn access(bus: &mut dyn Bus, payload: ExMemPayload) -> Result<MemoryEvent, B
                 Err(BusError::Busy { .. }) => Ok(MemoryEvent::Stall(payload)),
                 Err(BusError::MisalignedAccess { .. }) => Ok(MemoryEvent::Trap(Trap::Exception(
                     Exception::StoreAddressMisaligned {
-                        addr: address as u32,
+                        addr: virtual_address,
                     },
                 ))),
                 Err(error) => Err(error),

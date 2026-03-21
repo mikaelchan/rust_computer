@@ -73,8 +73,11 @@ The current baseline already has:
 - [ ] Extend privilege support beyond the first supervisor slice.
   Fuller privileged CSR semantics, richer supervisor-capable external devices, nested interrupt behavior, and real `satp`-driven translation remain future work.
 
-- [ ] Add virtual memory support.
-  A future MMU/TLB implementation should come after the cache/memory hierarchy is stable enough to study address translation interactions cleanly.
+- [x] Add the first virtual-memory slice.
+  The CPU now performs `Sv32` instruction and data address translation from `satp`, walks page tables across cycles, and raises instruction/load/store page faults through the existing trap machinery in both CPU models.
+
+- [ ] Extend virtual memory beyond the first slice.
+  TLBs, `sfence.vma`, richer supervisor memory-permission controls, and broader page-table experiments remain future work.
 
 - [ ] Keep the out-of-order path separate until the memory system is ready.
   OOO remains a future milestone, but it should not move ahead of the remaining cache/bus foundations.

@@ -12,6 +12,7 @@ use rvsim_system::{Bus, BusError};
 
 use crate::{
     core::CpuError,
+    mmu::{MemoryAccess, PageWalker, TranslationResult},
     state::{HartState, PrivilegeMode},
 };
 
@@ -26,6 +27,7 @@ pub struct ExecutionResult {
 /// Execute one decoded instruction against the current hart state.
 pub fn execute_decoded(
     state: &mut HartState,
+    walker: &mut PageWalker,
     bus: &mut dyn Bus,
     decoded: DecodedInstruction,
 ) -> Result<ExecutionResult, CpuError> {
@@ -70,8 +72,29 @@ pub fn execute_decoded(
             }
         }
         InstructionKind::Load(load_kind) => {
-            let address = u64::from(load_store::effective_address(rs1_value, decoded.imm));
-            match load_value(bus, load_kind, address) {
+            let virtual_address = load_store::effective_address(rs1_value, decoded.imm);
+            let physical_address = match walker.translate(
+                bus,
+                &state.csrs,
+                state.privilege,
+                virtual_address,
+                MemoryAccess::Load,
+            )? {
+                TranslationResult::PhysicalAddress(physical_address) => physical_address,
+                TranslationResult::Stall => {
+                    return Ok(ExecutionResult {
+                        retired: 0,
+                        trap: None,
+                        memory_access: true,
+                    });
+                }
+                TranslationResult::PageFault(trap) => {
+                    let mut result = apply_trap(state, trap, current_pc);
+                    result.memory_access = true;
+                    return Ok(result);
+                }
+            };
+            match load_value(bus, load_kind, u64::from(physical_address)) {
                 Ok(value) => {
                     write_rd(state, decoded.rd, value);
                     state.pc = next_pc;
@@ -89,7 +112,7 @@ pub fn execute_decoded(
                             memory_access: true,
                         });
                     }
-                    if let Some(trap) = map_memory_error(error.clone(), address as u32, true) {
+                    if let Some(trap) = map_memory_error(error.clone(), virtual_address, true) {
                         let mut result = apply_trap(state, trap, current_pc);
                         result.memory_access = true;
                         return Ok(result);
@@ -99,8 +122,29 @@ pub fn execute_decoded(
             }
         }
         InstructionKind::Store(store_kind) => {
-            let address = u64::from(load_store::effective_address(rs1_value, decoded.imm));
-            match store_value(bus, store_kind, address, rs2_value) {
+            let virtual_address = load_store::effective_address(rs1_value, decoded.imm);
+            let physical_address = match walker.translate(
+                bus,
+                &state.csrs,
+                state.privilege,
+                virtual_address,
+                MemoryAccess::Store,
+            )? {
+                TranslationResult::PhysicalAddress(physical_address) => physical_address,
+                TranslationResult::Stall => {
+                    return Ok(ExecutionResult {
+                        retired: 0,
+                        trap: None,
+                        memory_access: true,
+                    });
+                }
+                TranslationResult::PageFault(trap) => {
+                    let mut result = apply_trap(state, trap, current_pc);
+                    result.memory_access = true;
+                    return Ok(result);
+                }
+            };
+            match store_value(bus, store_kind, u64::from(physical_address), rs2_value) {
                 Ok(()) => {
                     state.pc = next_pc;
                     return Ok(ExecutionResult {
@@ -117,7 +161,7 @@ pub fn execute_decoded(
                             memory_access: true,
                         });
                     }
-                    if let Some(trap) = map_memory_error(error.clone(), address as u32, false) {
+                    if let Some(trap) = map_memory_error(error.clone(), virtual_address, false) {
                         let mut result = apply_trap(state, trap, current_pc);
                         result.memory_access = true;
                         return Ok(result);

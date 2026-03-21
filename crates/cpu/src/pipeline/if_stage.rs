@@ -1,23 +1,56 @@
+use rvsim_isa::{Exception, Trap};
 use rvsim_system::{Bus, BusError};
 
 use crate::{
+    mmu::{MemoryAccess, PageWalker, TranslationResult},
     pipeline::latches::IfIdPayload,
     predictor::{BranchPrediction, BranchPredictor},
+    state::{CsrFile, PrivilegeMode},
 };
 
+/// Outcome of one fetch attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchEvent {
+    Advance(IfIdPayload),
+    Stall,
+    Trap(Trap),
+}
+
 /// Fetch one instruction from the bus instruction path.
-pub fn fetch<P>(bus: &mut dyn Bus, pc: u32, predictor: &P) -> Result<IfIdPayload, BusError>
+pub fn fetch<P>(
+    bus: &mut dyn Bus,
+    walker: &mut PageWalker,
+    csrs: &CsrFile,
+    privilege: PrivilegeMode,
+    pc: u32,
+    predictor: &P,
+) -> Result<FetchEvent, BusError>
 where
     P: BranchPredictor + ?Sized,
 {
-    let raw = bus.fetch32(u64::from(pc))?;
+    let physical_address =
+        match walker.translate(bus, csrs, privilege, pc, MemoryAccess::Instruction)? {
+            TranslationResult::PhysicalAddress(physical_address) => physical_address,
+            TranslationResult::Stall => return Ok(FetchEvent::Stall),
+            TranslationResult::PageFault(trap) => return Ok(FetchEvent::Trap(trap)),
+        };
+    let raw = match bus.fetch32(u64::from(physical_address)) {
+        Ok(raw) => raw,
+        Err(BusError::Busy { .. }) => return Ok(FetchEvent::Stall),
+        Err(BusError::MisalignedAccess { .. }) => {
+            return Ok(FetchEvent::Trap(Trap::Exception(
+                Exception::InstructionAddressMisaligned { addr: pc },
+            )));
+        }
+        Err(error) => return Err(error),
+    };
     let prediction = predict_from_raw(pc, raw, predictor);
-    Ok(IfIdPayload {
+    Ok(FetchEvent::Advance(IfIdPayload {
         pc,
         raw,
         predicted_pc: prediction.target,
         predicted_taken: prediction.taken,
-    })
+    }))
 }
 
 fn predict_from_raw<P>(pc: u32, raw: u32, predictor: &P) -> BranchPrediction

@@ -4,6 +4,7 @@ use rvsim_system::{Bus, BusError, CpuCycle, Processor, SimComponent};
 use crate::{
     core::{CpuError, CpuModel},
     exec::{ExecutionResult, apply_trap, execute_decoded},
+    mmu::{MemoryAccess, PageWalker, TranslationResult},
     state::HartState,
 };
 
@@ -13,6 +14,7 @@ pub struct ReferenceCore {
     reset_vector: u32,
     cycle: u64,
     state: HartState,
+    page_walker: PageWalker,
     pending_decoded: Option<rvsim_isa::DecodedInstruction>,
     last_result: ExecutionResult,
 }
@@ -24,6 +26,7 @@ impl ReferenceCore {
             reset_vector,
             cycle: 0,
             state: HartState::new(reset_vector),
+            page_walker: PageWalker::default(),
             pending_decoded: None,
             last_result: ExecutionResult::default(),
         }
@@ -53,6 +56,7 @@ impl SimComponent for ReferenceCore {
     fn reset(&mut self) {
         self.cycle = 0;
         self.state.reset(self.reset_vector);
+        self.page_walker.reset();
         self.pending_decoded = None;
         self.last_result = ExecutionResult::default();
     }
@@ -93,7 +97,34 @@ impl Processor for ReferenceCore {
             decoded
         } else {
             let pc = self.state.pc;
-            let raw = match bus.fetch32(u64::from(pc)) {
+            let physical_address = match self.page_walker.translate(
+                bus,
+                &self.state.csrs,
+                self.state.privilege,
+                pc,
+                MemoryAccess::Instruction,
+            )? {
+                TranslationResult::PhysicalAddress(physical_address) => physical_address,
+                TranslationResult::Stall => {
+                    self.last_result = ExecutionResult {
+                        retired: 0,
+                        trap: None,
+                        memory_access: true,
+                    };
+                    return Ok(CpuCycle {
+                        retired_instructions: 0,
+                        stalled: true,
+                    });
+                }
+                TranslationResult::PageFault(trap) => {
+                    self.last_result = apply_trap(&mut self.state, trap, pc);
+                    return Ok(CpuCycle {
+                        retired_instructions: 0,
+                        stalled: true,
+                    });
+                }
+            };
+            let raw = match bus.fetch32(u64::from(physical_address)) {
                 Ok(raw) => raw,
                 Err(BusError::Busy { .. }) => {
                     self.last_result = ExecutionResult {
@@ -136,7 +167,7 @@ impl Processor for ReferenceCore {
             }
         };
 
-        self.last_result = execute_decoded(&mut self.state, bus, decoded)?;
+        self.last_result = execute_decoded(&mut self.state, &mut self.page_walker, bus, decoded)?;
         self.pending_decoded =
             (self.last_result.retired == 0 && self.last_result.trap.is_none()).then_some(decoded);
 
@@ -164,21 +195,41 @@ mod tests {
 
     #[derive(Debug)]
     struct TinyBus {
-        bytes: [u8; 128],
+        bytes: Vec<u8>,
     }
 
     impl Default for TinyBus {
         fn default() -> Self {
-            Self { bytes: [0; 128] }
+            Self::new(0x10_000)
         }
     }
 
     impl TinyBus {
-        fn load_program(&mut self, words: &[u32]) {
-            for (word_index, word) in words.iter().copied().enumerate() {
-                let base = word_index * 4;
-                self.bytes[base..base + 4].copy_from_slice(&word.to_le_bytes());
+        fn new(size: usize) -> Self {
+            Self {
+                bytes: vec![0; size],
             }
+        }
+
+        fn load_program(&mut self, words: &[u32]) {
+            self.store_words(0, words);
+        }
+
+        fn store_words(&mut self, base: u32, words: &[u32]) {
+            for (word_index, word) in words.iter().copied().enumerate() {
+                let offset = base as usize + word_index * 4;
+                self.bytes[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+            }
+        }
+
+        fn store_word(&mut self, addr: u32, word: u32) {
+            let offset = addr as usize;
+            self.bytes[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+
+        fn read_word(&self, addr: u32) -> u32 {
+            let offset = addr as usize;
+            u32::from_le_bytes(self.bytes[offset..offset + 4].try_into().unwrap_or([0; 4]))
         }
     }
 
@@ -274,6 +325,118 @@ mod tests {
         let state = core.hart_state();
         assert_eq!(state.registers.read(1), 0);
         assert_eq!(state.csrs.read(rvsim_isa::CsrAddress::Mtvec), 7);
+    }
+
+    #[test]
+    fn fetches_instructions_through_sv32_translation() {
+        let mut bus = TinyBus::default();
+        bus.store_words(0x0000, &[encode_addi(1, 0, 5), encode_jal(0, 0)]);
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+
+        let mut core = ReferenceCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+
+        for _ in 0..4 {
+            core.step_cycle(&mut bus)
+                .expect("sv32 instruction fetch should execute");
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 5);
+        assert_eq!(core.hart_state().pc, 0x4004);
+    }
+
+    #[test]
+    fn executes_load_store_through_sv32_translation() {
+        let mut bus = TinyBus::default();
+        bus.store_words(
+            0x0000,
+            &[
+                encode_lui(1, 0x8),
+                encode_addi(2, 0, 9),
+                encode_sw(2, 1, 0),
+                encode_lw(3, 1, 0),
+                encode_jal(0, 0),
+            ],
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_W | PTE_A | PTE_D,
+        );
+
+        let mut core = ReferenceCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("sv32 load/store flow should execute");
+        }
+
+        assert_eq!(core.hart_state().registers.read(3), 9);
+        assert_eq!(bus.read_word(0x1000), 9);
+    }
+
+    #[test]
+    fn traps_on_instruction_page_fault_during_sv32_fetch() {
+        let mut bus = TinyBus::default();
+        bus.store_words(0x0080, &[encode_addi(10, 0, 1), encode_jal(0, 0)]);
+
+        let mut core = ReferenceCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x80);
+
+        core.step_cycle(&mut bus)
+            .expect("instruction page fault should trap");
+        core.step_cycle(&mut bus)
+            .expect("machine handler should execute after page fault");
+
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().registers.read(10), 1);
+        assert_eq!(core.hart_state().pc, 0x84);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            12
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc),
+            0x4000
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            0x4000
+        );
     }
 
     #[test]
@@ -855,6 +1018,14 @@ mod tests {
         0x1020_0073
     }
 
+    const SATP_MODE_SV32: u32 = 1 << 31;
+    const PTE_V: u32 = 1 << 0;
+    const PTE_R: u32 = 1 << 1;
+    const PTE_W: u32 = 1 << 2;
+    const PTE_X: u32 = 1 << 3;
+    const PTE_A: u32 = 1 << 6;
+    const PTE_D: u32 = 1 << 7;
+
     fn encode_lui(rd: u8, upper_20: u32) -> u32 {
         (upper_20 << 12) | ((rd as u32) << 7) | 0b0110111
     }
@@ -881,5 +1052,30 @@ mod tests {
         let bit11 = ((imm >> 11) & 0x1) << 20;
         let bits19_12 = ((imm >> 12) & 0xff) << 12;
         bit20 | bits19_12 | bit11 | bits10_1 | ((rd as u32) << 7) | 0b1101111
+    }
+
+    fn install_sv32_mapping(
+        bus: &mut TinyBus,
+        root_table: u32,
+        leaf_table: u32,
+        virtual_page: u32,
+        physical_page: u32,
+        flags: u32,
+    ) {
+        let vpn1 = (virtual_page >> 22) & 0x3ff;
+        let vpn0 = (virtual_page >> 12) & 0x3ff;
+        bus.store_word(root_table + (vpn1 * 4), sv32_nonleaf(leaf_table));
+        bus.store_word(
+            leaf_table + (vpn0 * 4),
+            sv32_leaf(physical_page, flags | PTE_V),
+        );
+    }
+
+    fn sv32_nonleaf(next_table: u32) -> u32 {
+        ((next_table >> 12) << 10) | PTE_V
+    }
+
+    fn sv32_leaf(physical_page: u32, flags: u32) -> u32 {
+        ((physical_page >> 12) << 10) | flags
     }
 }
