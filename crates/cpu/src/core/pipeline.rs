@@ -940,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn satp_write_switches_address_space_after_tlb_flush() {
+    fn satp_write_switches_address_space() {
         let mut bus = TestBus::new(0x10_000);
         bus.store_words(
             0x0000,
@@ -1004,6 +1004,105 @@ mod tests {
         assert_eq!(core.hart_state().registers.read(2), 5);
         assert_eq!(core.hart_state().registers.read(4), 9);
         assert_eq!(core.stats().translation_barrier_flushes, 1);
+    }
+
+    #[test]
+    fn satp_write_preserves_tlb_namespace_until_sfence_vma() {
+        let satp_asid_1 = sv32_satp_with_asid(0x2000, 1);
+        let satp_asid_2 = sv32_satp_with_asid(0x5000, 2);
+
+        let mut bus = TestBus::new(0x10_000);
+        bus.store_words(
+            0x0000,
+            &[
+                encode_lui(1, 0x8),
+                encode_lw(2, 1, 0),
+                encode_lui(3, satp_asid_2 >> 12),
+                encode_addi(3, 3, (satp_asid_2 & 0x0fff) as i16),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Satp as u16, 3),
+                encode_lw(4, 1, 0),
+                encode_lui(5, satp_asid_1 >> 12),
+                encode_addi(5, 5, (satp_asid_1 & 0x0fff) as i16),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Satp as u16, 5),
+                encode_lw(6, 1, 0),
+                encode_sfence_vma(0, 0),
+                encode_lw(7, 1, 0),
+                encode_jal(0, 0),
+            ],
+        );
+        bus.store_word(0x1000, 5);
+        bus.store_word(0x7000, 7);
+        bus.store_word(0x9000, 9);
+
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x8000,
+            0x7000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        let mut core = PipelineCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, satp_asid_1);
+
+        for _ in 0..12 {
+            core.step_cycle(&mut bus)
+                .expect("first ASID load should execute");
+            if core.hart_state().registers.read(2) == 5 {
+                break;
+            }
+        }
+        assert_eq!(core.hart_state().registers.read(2), 5);
+
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x9000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        for _ in 0..32 {
+            core.step_cycle(&mut bus)
+                .expect("satp namespace preservation flow should execute");
+            if core.hart_state().registers.read(7) == 9 {
+                break;
+            }
+        }
+
+        assert_eq!(core.hart_state().registers.read(4), 7);
+        assert_eq!(core.hart_state().registers.read(6), 5);
+        assert_eq!(core.hart_state().registers.read(7), 9);
+        assert_eq!(core.stats().translation_barrier_flushes, 3);
     }
 
     #[test]
@@ -1960,5 +2059,9 @@ mod tests {
 
     fn sv32_leaf(physical_page: u32, flags: u32) -> u32 {
         ((physical_page >> 12) << 10) | flags
+    }
+
+    fn sv32_satp_with_asid(root_table: u32, asid: u32) -> u32 {
+        SATP_MODE_SV32 | (asid << 22) | (root_table >> 12)
     }
 }

@@ -6,8 +6,7 @@ pub mod csr;
 pub mod load_store;
 
 use rvsim_isa::{
-    CsrAddress, DecodedInstruction, Exception, LoadKind, StoreKind, SystemKind, Trap,
-    opcode::InstructionKind,
+    DecodedInstruction, Exception, LoadKind, StoreKind, SystemKind, Trap, opcode::InstructionKind,
 };
 use rvsim_system::{Bus, BusError};
 
@@ -207,9 +206,6 @@ pub fn execute_decoded(
             write_rd(state, decoded.rd, outcome.read_value);
             if let Some(write) = outcome.write {
                 state.csrs.write(write.address, write.value);
-                if write.address == CsrAddress::Satp {
-                    walker.flush();
-                }
             }
             state.pc = next_pc;
         }
