@@ -21,6 +21,7 @@ const PTE_R: u32 = 1 << 1;
 const PTE_W: u32 = 1 << 2;
 const PTE_X: u32 = 1 << 3;
 const PTE_U: u32 = 1 << 4;
+const PTE_G: u32 = 1 << 5;
 const PTE_A: u32 = 1 << 6;
 const PTE_D: u32 = 1 << 7;
 const PTE_PPN_MASK: u32 = (1 << 22) - 1;
@@ -59,6 +60,7 @@ struct WalkState {
     request: TranslationRequest,
     level: u32,
     pte_address: u32,
+    global_mapping: bool,
     phase: WalkPhase,
 }
 
@@ -88,6 +90,7 @@ struct TlbEntry {
     physical_base: u32,
     page_mask: u32,
     flags: u32,
+    global_mapping: bool,
 }
 
 enum StepResult {
@@ -162,6 +165,7 @@ impl PageWalker {
                     request,
                     level: 1,
                     pte_address: root_pte_address(request),
+                    global_mapping: false,
                     phase: WalkPhase::ReadPte,
                 });
             }
@@ -275,6 +279,7 @@ impl PageWalker {
             request: state.request,
             level: next_level,
             pte_address: next_table_base.wrapping_add(vpn_index * 4),
+            global_mapping: state.global_mapping || pte_is_global(flags),
             phase: WalkPhase::ReadPte,
         });
         Ok(StepResult::Drained)
@@ -348,6 +353,7 @@ impl PageWalker {
             physical_base: physical_address & !page_mask,
             page_mask,
             flags,
+            global_mapping: state.global_mapping || pte_is_global(flags),
         };
         self.tlb[self.next_tlb_entry] = Some(entry);
         self.next_tlb_entry = (self.next_tlb_entry + 1) % TLB_ENTRY_COUNT;
@@ -392,12 +398,16 @@ impl TranslationFence {
     }
 
     const fn matches_entry(self, entry: TlbEntry) -> bool {
-        self.matches_asid(entry.satp) && self.matches_virtual_address(entry)
+        self.matches_asid(entry) && self.matches_virtual_address(entry)
     }
 
-    const fn matches_asid(self, satp: u32) -> bool {
+    const fn matches_asid(self, entry: TlbEntry) -> bool {
+        if self.asid.is_some() && entry.global_mapping {
+            return false;
+        }
+
         match self.asid {
-            Some(asid) => satp_asid(satp) == asid,
+            Some(asid) => satp_asid(entry.satp) == asid,
             None => true,
         }
     }
@@ -412,7 +422,7 @@ impl TranslationFence {
 
 impl TlbEntry {
     const fn matches(self, request: TranslationRequest) -> bool {
-        self.satp == request.satp
+        (self.global_mapping || self.satp == request.satp)
             && (request.virtual_address & !self.page_mask) == self.virtual_base
     }
 
@@ -452,6 +462,10 @@ const fn pte_flags(pte: u32) -> u32 {
 
 const fn pte_ppn(pte: u32) -> u32 {
     (pte >> 10) & PTE_PPN_MASK
+}
+
+const fn pte_is_global(flags: u32) -> bool {
+    (flags & PTE_G) != 0
 }
 
 const fn access_bits_for(request: TranslationRequest) -> u32 {
@@ -621,6 +635,7 @@ mod tests {
             request,
             level: 1,
             pte_address: 0,
+            global_mapping: false,
             phase: WalkPhase::ReadPte,
         };
 
@@ -885,6 +900,88 @@ mod tests {
         assert_eq!(bus.read_word(0x3010) & PTE_A, PTE_A);
         assert_eq!(bus.read_word(0x3010) & PTE_D, 0);
         assert_eq!(bus.store32_count, 1);
+    }
+
+    #[test]
+    fn global_mapping_survives_asid_flush_and_hits_across_address_spaces() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D | PTE_G,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x4000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D | PTE_G,
+        );
+
+        csrs.write(CsrAddress::Satp, sv32_satp_with_asid(0x2000, 1));
+        let first = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("global translation should succeed");
+
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x3000,
+            PTE_R | PTE_A | PTE_D | PTE_G,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x4000,
+            0x3000,
+            PTE_R | PTE_A | PTE_D | PTE_G,
+        );
+
+        walker.flush_fence(TranslationFence::from_operands(Some(0), 0, Some(2), 1));
+
+        csrs.write(CsrAddress::Satp, sv32_satp_with_asid(0x5000, 2));
+        let second = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("global tlb entry should survive ASID flush");
+
+        walker.flush();
+
+        let third = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("global flush should force a rewalk");
+
+        assert_eq!(first, TranslationResult::PhysicalAddress(0x1123));
+        assert_eq!(second, TranslationResult::PhysicalAddress(0x1123));
+        assert_eq!(third, TranslationResult::PhysicalAddress(0x3123));
+        assert_eq!(bus.load32_count, 4);
     }
 
     #[test]

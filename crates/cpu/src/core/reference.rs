@@ -681,6 +681,108 @@ mod tests {
     }
 
     #[test]
+    fn asid_specific_sfence_vma_preserves_global_mapping() {
+        let satp_asid_1 = sv32_satp_with_asid(0x2000, 1);
+        let satp_asid_2 = sv32_satp_with_asid(0x5000, 2);
+
+        let mut bus = TinyBus::default();
+        bus.store_words(
+            0x0000,
+            &[
+                encode_lui(1, 0x8),
+                encode_lw(2, 1, 0),
+                encode_addi(4, 0, 1),
+                encode_sfence_vma(0, 4),
+                encode_lui(3, satp_asid_2 >> 12),
+                encode_addi(3, 3, (satp_asid_2 & 0x0fff) as i16),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Satp as u16, 3),
+                encode_lw(5, 1, 0),
+                encode_sfence_vma(0, 0),
+                encode_lw(6, 1, 0),
+                encode_jal(0, 0),
+            ],
+        );
+        bus.store_word(0x1000, 5);
+        bus.store_word(0x3000, 9);
+
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D | PTE_G,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D | PTE_G,
+        );
+
+        let mut core = ReferenceCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, satp_asid_1);
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("initial global translation should execute");
+            if core.hart_state().registers.read(2) == 5 {
+                break;
+            }
+        }
+        assert_eq!(core.hart_state().registers.read(2), 5);
+
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x3000,
+            PTE_R | PTE_A | PTE_D | PTE_G,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x8000,
+            0x3000,
+            PTE_R | PTE_A | PTE_D | PTE_G,
+        );
+
+        for _ in 0..16 {
+            core.step_cycle(&mut bus)
+                .expect("global mapping flow should execute");
+            if core.hart_state().registers.read(6) == 9 {
+                break;
+            }
+        }
+
+        assert_eq!(core.hart_state().registers.read(5), 5);
+        assert_eq!(core.hart_state().registers.read(6), 9);
+    }
+
+    #[test]
     fn sfence_vma_flushes_stale_translation() {
         let mut bus = TinyBus::default();
         bus.store_words(
@@ -1465,6 +1567,7 @@ mod tests {
     const PTE_W: u32 = 1 << 2;
     const PTE_X: u32 = 1 << 3;
     const PTE_U: u32 = 1 << 4;
+    const PTE_G: u32 = 1 << 5;
     const PTE_A: u32 = 1 << 6;
     const PTE_D: u32 = 1 << 7;
     const MSTATUS_SUM: u32 = 1 << 18;
