@@ -1850,6 +1850,194 @@ mod tests {
     }
 
     #[test]
+    fn machine_mode_can_take_nested_machine_interrupt_after_reenabling_mie() {
+        let mut bus = TestBus::new(512);
+        bus.load_program(&[encode_addi(1, 0, 1), encode_jal(0, 0)]);
+        bus.store_words(0x008c, &[encode_addi(12, 0, 12), encode_mret()]);
+        bus.store_words(
+            0x009c,
+            &[
+                encode_csrrs(20, rvsim_isa::CsrAddress::Mepc as u16, 0),
+                encode_csrrs(22, rvsim_isa::CsrAddress::Mstatus as u16, 0),
+                encode_csrrsi(0, rvsim_isa::CsrAddress::Mstatus as u16, 8),
+                encode_addi(21, 0, 21),
+                encode_addi(11, 0, 11),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Mepc as u16, 20),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Mstatus as u16, 22),
+                encode_mret(),
+            ],
+        );
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, (1 << 7) | (1 << 3));
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x80 | 0b01);
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::MachineTimer);
+
+        for _ in 0..16 {
+            core.step_cycle(&mut bus)
+                .expect("outer machine interrupt should trap through pipeline");
+            if core.hart_state().pc == 0x009c {
+                break;
+            }
+        }
+
+        assert_eq!(core.hart_state().pc, 0x009c);
+
+        bus.pending_interrupts = InterruptSet::empty();
+
+        for _ in 0..16 {
+            core.step_cycle(&mut bus).expect(
+                "outer machine handler should save state and re-enable mie through pipeline",
+            );
+            if core.hart_state().registers.read(21) == 21 {
+                break;
+            }
+        }
+
+        assert_eq!(core.hart_state().registers.read(21), 21);
+
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::MachineSoftware);
+
+        for _ in 0..16 {
+            core.step_cycle(&mut bus)
+                .expect("nested machine interrupt should trap through pipeline");
+            if core.hart_state().pc == 0x008c {
+                break;
+            }
+        }
+
+        assert_eq!(core.hart_state().pc, 0x008c);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc),
+            0x00b0
+        );
+
+        bus.pending_interrupts = InterruptSet::empty();
+
+        for _ in 0..32 {
+            core.step_cycle(&mut bus)
+                .expect("nested machine handlers should unwind through pipeline");
+            if core.hart_state().registers.read(1) == 1 {
+                break;
+            }
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 1);
+        assert_eq!(core.hart_state().registers.read(11), 11);
+        assert_eq!(core.hart_state().registers.read(12), 12);
+        assert_eq!(core.hart_state().registers.read(21), 21);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().pc, 4);
+        assert_eq!(core.stats().trap_count, 2);
+    }
+
+    #[test]
+    fn supervisor_mode_can_take_nested_supervisor_interrupt_after_reenabling_sie() {
+        let mut bus = TestBus::new(512);
+        bus.load_program(&[encode_addi(1, 0, 1), encode_jal(0, 0)]);
+        bus.store_words(0x0104, &[encode_addi(12, 0, 12), encode_sret()]);
+        bus.store_words(
+            0x0114,
+            &[
+                encode_csrrs(20, rvsim_isa::CsrAddress::Sepc as u16, 0),
+                encode_csrrs(22, rvsim_isa::CsrAddress::Sstatus as u16, 0),
+                encode_csrrsi(0, rvsim_isa::CsrAddress::Sstatus as u16, 2),
+                encode_addi(21, 0, 21),
+                encode_addi(11, 0, 11),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Sepc as u16, 20),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Sstatus as u16, 22),
+                encode_sret(),
+            ],
+        );
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mideleg, (1 << 5) | (1 << 1));
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sie, (1 << 5) | (1 << 1));
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sstatus, 1 << 1);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x100 | 0b01);
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::SupervisorTimer);
+
+        for _ in 0..16 {
+            core.step_cycle(&mut bus)
+                .expect("outer supervisor interrupt should trap through pipeline");
+            if core.hart_state().pc == 0x0114 {
+                break;
+            }
+        }
+
+        assert_eq!(core.hart_state().pc, 0x0114);
+
+        bus.pending_interrupts = InterruptSet::empty();
+
+        for _ in 0..16 {
+            core.step_cycle(&mut bus).expect(
+                "outer supervisor handler should save state and re-enable sie through pipeline",
+            );
+            if core.hart_state().registers.read(21) == 21 {
+                break;
+            }
+        }
+
+        assert_eq!(core.hart_state().registers.read(21), 21);
+
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::SupervisorSoftware);
+
+        for _ in 0..16 {
+            core.step_cycle(&mut bus)
+                .expect("nested supervisor interrupt should trap through pipeline");
+            if core.hart_state().pc == 0x0104 {
+                break;
+            }
+        }
+
+        assert_eq!(core.hart_state().pc, 0x0104);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sepc),
+            0x0128
+        );
+
+        bus.pending_interrupts = InterruptSet::empty();
+
+        for _ in 0..32 {
+            core.step_cycle(&mut bus)
+                .expect("nested supervisor handlers should unwind through pipeline");
+            if core.hart_state().registers.read(1) == 1 {
+                break;
+            }
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 1);
+        assert_eq!(core.hart_state().registers.read(11), 11);
+        assert_eq!(core.hart_state().registers.read(12), 12);
+        assert_eq!(core.hart_state().registers.read(21), 21);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Supervisor
+        );
+        assert_eq!(core.hart_state().pc, 4);
+        assert_eq!(core.stats().trap_count, 2);
+    }
+
+    #[test]
     fn supervisor_wfi_traps_when_tw_is_set() {
         let mut bus = TestBus::new(128);
         bus.store_words(
@@ -3553,6 +3741,14 @@ mod tests {
         ((csr as u32) << 20)
             | ((zimm as u32) << 15)
             | (0b101 << 12)
+            | ((rd as u32) << 7)
+            | 0b1110011
+    }
+
+    fn encode_csrrsi(rd: u8, csr: u16, zimm: u8) -> u32 {
+        ((csr as u32) << 20)
+            | ((zimm as u32) << 15)
+            | (0b110 << 12)
             | ((rd as u32) << 7)
             | 0b1110011
     }

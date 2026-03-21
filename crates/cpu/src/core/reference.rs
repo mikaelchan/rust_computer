@@ -1981,6 +1981,174 @@ mod tests {
     }
 
     #[test]
+    fn machine_mode_can_take_nested_machine_interrupt_after_reenabling_mie() {
+        let mut bus = TinyBus::default();
+        bus.load_program(&[encode_addi(1, 0, 1), encode_jal(0, 0)]);
+        bus.store_words(0x008c, &[encode_addi(12, 0, 12), encode_mret()]);
+        bus.store_words(
+            0x009c,
+            &[
+                encode_csrrs(20, rvsim_isa::CsrAddress::Mepc as u16, 0),
+                encode_csrrs(22, rvsim_isa::CsrAddress::Mstatus as u16, 0),
+                encode_csrrsi(0, rvsim_isa::CsrAddress::Mstatus as u16, 8),
+                encode_addi(21, 0, 21),
+                encode_addi(11, 0, 11),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Mepc as u16, 20),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Mstatus as u16, 22),
+                encode_mret(),
+            ],
+        );
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, (1 << 7) | (1 << 3));
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x80 | 0b01);
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::MachineTimer);
+
+        core.step_cycle(&mut bus)
+            .expect("outer machine interrupt should trap");
+        assert_eq!(core.hart_state().pc, 0x009c);
+
+        bus.pending_interrupts = InterruptSet::empty();
+
+        for _ in 0..4 {
+            core.step_cycle(&mut bus)
+                .expect("outer machine handler should save state and re-enable mie");
+        }
+
+        assert_eq!(core.hart_state().registers.read(21), 21);
+
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::MachineSoftware);
+
+        core.step_cycle(&mut bus)
+            .expect("nested machine interrupt should trap after mie is re-enabled");
+        assert_eq!(core.hart_state().pc, 0x008c);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc),
+            0x00ac
+        );
+
+        bus.pending_interrupts = InterruptSet::empty();
+
+        core.step_cycle(&mut bus)
+            .expect("inner machine handler should execute");
+        core.step_cycle(&mut bus)
+            .expect("inner mret should return to outer machine handler");
+        core.step_cycle(&mut bus)
+            .expect("outer handler should resume after nested machine interrupt");
+        core.step_cycle(&mut bus)
+            .expect("outer handler should restore original mepc");
+        core.step_cycle(&mut bus)
+            .expect("outer handler should restore original mstatus");
+        core.step_cycle(&mut bus)
+            .expect("outer mret should return to interrupted machine code");
+        core.step_cycle(&mut bus)
+            .expect("machine code should resume after nested machine interrupts");
+
+        assert_eq!(core.hart_state().registers.read(1), 1);
+        assert_eq!(core.hart_state().registers.read(11), 11);
+        assert_eq!(core.hart_state().registers.read(12), 12);
+        assert_eq!(core.hart_state().registers.read(21), 21);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().pc, 4);
+    }
+
+    #[test]
+    fn supervisor_mode_can_take_nested_supervisor_interrupt_after_reenabling_sie() {
+        let mut bus = TinyBus::default();
+        bus.load_program(&[encode_addi(1, 0, 1), encode_jal(0, 0)]);
+        bus.store_words(0x0104, &[encode_addi(12, 0, 12), encode_sret()]);
+        bus.store_words(
+            0x0114,
+            &[
+                encode_csrrs(20, rvsim_isa::CsrAddress::Sepc as u16, 0),
+                encode_csrrs(22, rvsim_isa::CsrAddress::Sstatus as u16, 0),
+                encode_csrrsi(0, rvsim_isa::CsrAddress::Sstatus as u16, 2),
+                encode_addi(21, 0, 21),
+                encode_addi(11, 0, 11),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Sepc as u16, 20),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Sstatus as u16, 22),
+                encode_sret(),
+            ],
+        );
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mideleg, (1 << 5) | (1 << 1));
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sie, (1 << 5) | (1 << 1));
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sstatus, 1 << 1);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x100 | 0b01);
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::SupervisorTimer);
+
+        core.step_cycle(&mut bus)
+            .expect("outer supervisor interrupt should trap");
+        assert_eq!(core.hart_state().pc, 0x0114);
+
+        bus.pending_interrupts = InterruptSet::empty();
+
+        for _ in 0..4 {
+            core.step_cycle(&mut bus)
+                .expect("outer supervisor handler should save state and re-enable sie");
+        }
+
+        assert_eq!(core.hart_state().registers.read(21), 21);
+
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::SupervisorSoftware);
+
+        core.step_cycle(&mut bus)
+            .expect("nested supervisor interrupt should trap after sie is re-enabled");
+        assert_eq!(core.hart_state().pc, 0x0104);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sepc),
+            0x0124
+        );
+
+        bus.pending_interrupts = InterruptSet::empty();
+
+        core.step_cycle(&mut bus)
+            .expect("inner supervisor handler should execute");
+        core.step_cycle(&mut bus)
+            .expect("inner sret should return to outer supervisor handler");
+        core.step_cycle(&mut bus)
+            .expect("outer handler should resume after nested supervisor interrupt");
+        core.step_cycle(&mut bus)
+            .expect("outer handler should restore original sepc");
+        core.step_cycle(&mut bus)
+            .expect("outer handler should restore original sstatus");
+        core.step_cycle(&mut bus)
+            .expect("outer sret should return to interrupted supervisor code");
+        core.step_cycle(&mut bus)
+            .expect("supervisor code should resume after nested supervisor interrupts");
+
+        assert_eq!(core.hart_state().registers.read(1), 1);
+        assert_eq!(core.hart_state().registers.read(11), 11);
+        assert_eq!(core.hart_state().registers.read(12), 12);
+        assert_eq!(core.hart_state().registers.read(21), 21);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Supervisor
+        );
+        assert_eq!(core.hart_state().pc, 4);
+    }
+
+    #[test]
     fn interrupt_priority_prefers_machine_external_over_software_and_timer() {
         let mut bus = InterruptBus {
             pending_interrupts: InterruptSet::from(InterruptLine::MachineSoftware)
@@ -2801,6 +2969,14 @@ mod tests {
 
     fn encode_csrrs(rd: u8, csr: u16, rs1: u8) -> u32 {
         ((csr as u32) << 20) | ((rs1 as u32) << 15) | (0b010 << 12) | ((rd as u32) << 7) | 0b1110011
+    }
+
+    fn encode_csrrsi(rd: u8, csr: u16, zimm: u8) -> u32 {
+        ((csr as u32) << 20)
+            | ((zimm as u32) << 15)
+            | (0b110 << 12)
+            | ((rd as u32) << 7)
+            | 0b1110011
     }
 
     fn encode_csrrw(rd: u8, csr: u16, rs1: u8) -> u32 {
