@@ -823,6 +823,45 @@ mod tests {
     }
 
     #[test]
+    fn hardware_manages_accessed_and_dirty_bits_for_data_pages() {
+        let mut bus = TestBus::new(0x10_000);
+        bus.store_words(
+            0x0000,
+            &[
+                encode_lui(1, 0x8),
+                encode_addi(2, 0, 9),
+                encode_sw(2, 1, 0),
+                encode_lw(3, 1, 0),
+                encode_jal(0, 0),
+            ],
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(&mut bus, 0x2000, 0x3000, 0x8000, 0x1000, PTE_R | PTE_W);
+
+        let mut core = PipelineCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+
+        for _ in 0..14 {
+            core.step_cycle(&mut bus)
+                .expect("sv32 load/store flow should update ad bits");
+        }
+
+        assert_eq!(core.hart_state().registers.read(3), 9);
+        assert_eq!(bus.read_word(0x1000), 9);
+        assert_eq!(bus.read_word(0x3020) & (PTE_A | PTE_D), PTE_A | PTE_D);
+    }
+
+    #[test]
     fn supervisor_sum_allows_loading_user_pages() {
         let mut bus = TestBus::new(0x10_000);
         bus.store_words(

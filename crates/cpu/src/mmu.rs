@@ -51,6 +51,17 @@ struct WalkState {
     request: TranslationRequest,
     level: u32,
     pte_address: u32,
+    phase: WalkPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalkPhase {
+    ReadPte,
+    WriteLeaf {
+        physical_address: u32,
+        flags: u32,
+        value: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +141,7 @@ impl PageWalker {
                     request,
                     level: 1,
                     pte_address: root_pte_address(request),
+                    phase: WalkPhase::ReadPte,
                 });
             }
 
@@ -148,6 +160,15 @@ impl PageWalker {
         let state = self
             .active
             .expect("page walker step requires an active translation");
+
+        if let WalkPhase::WriteLeaf {
+            physical_address,
+            flags,
+            value,
+        } = state.phase
+        {
+            return self.finish_leaf_update(bus, state, physical_address, flags, value, drain_only);
+        }
 
         let pte = match bus.load32(u64::from(state.pte_address)) {
             Ok(pte) => pte,
@@ -194,6 +215,18 @@ impl PageWalker {
                 });
             }
 
+            if needs_access_bit_update(state.request, flags) {
+                self.active = Some(WalkState {
+                    phase: WalkPhase::WriteLeaf {
+                        physical_address,
+                        flags: updated_flags(state.request, flags),
+                        value: updated_pte(pte, state.request),
+                    },
+                    ..state
+                });
+                return self.step(bus, drain_only);
+            }
+
             if !drain_only {
                 self.insert_tlb(state, flags, physical_address);
             }
@@ -221,22 +254,65 @@ impl PageWalker {
             request: state.request,
             level: next_level,
             pte_address: next_table_base.wrapping_add(vpn_index * 4),
+            phase: WalkPhase::ReadPte,
         });
         Ok(StepResult::Drained)
     }
 
-    fn lookup_tlb(&self, request: TranslationRequest) -> Option<TranslationResult> {
-        let entry = self
-            .tlb
-            .iter()
-            .flatten()
-            .find(|entry| entry.matches(request))?;
+    fn finish_leaf_update(
+        &mut self,
+        bus: &mut dyn Bus,
+        state: WalkState,
+        physical_address: u32,
+        flags: u32,
+        value: u32,
+        drain_only: bool,
+    ) -> Result<StepResult, BusError> {
+        match bus.store32(u64::from(state.pte_address), value) {
+            Ok(()) => {
+                if !drain_only {
+                    self.insert_tlb(state, flags, physical_address);
+                }
+                self.active = None;
+                Ok(if drain_only {
+                    StepResult::Drained
+                } else {
+                    StepResult::Ready(physical_address)
+                })
+            }
+            Err(BusError::Busy { .. }) => Ok(StepResult::Stall),
+            Err(BusError::MisalignedAccess { .. })
+            | Err(BusError::UnmappedAddress { .. })
+            | Err(BusError::ReadOnlyAddress { .. })
+            | Err(BusError::DeviceFault { .. }) => {
+                self.active = None;
+                Ok(if drain_only {
+                    StepResult::Drained
+                } else {
+                    StepResult::PageFault(page_fault(state.request))
+                })
+            }
+        }
+    }
 
-        if !permissions_allow(request, entry.flags) {
-            return Some(TranslationResult::PageFault(page_fault(request)));
+    fn lookup_tlb(&self, request: TranslationRequest) -> Option<TranslationResult> {
+        let mut saw_permission_fault = false;
+        for entry in self.tlb.iter().flatten().copied() {
+            if !entry.matches(request) {
+                continue;
+            }
+            if !permissions_allow(request, entry.flags) {
+                saw_permission_fault = true;
+                continue;
+            }
+            if needs_access_bit_update(request, entry.flags) {
+                continue;
+            }
+
+            return Some(TranslationResult::PhysicalAddress(entry.translate(request)));
         }
 
-        Some(TranslationResult::PhysicalAddress(entry.translate(request)))
+        saw_permission_fault.then_some(TranslationResult::PageFault(page_fault(request)))
     }
 
     fn insert_tlb(&mut self, state: WalkState, flags: u32, physical_address: u32) {
@@ -307,6 +383,27 @@ const fn pte_ppn(pte: u32) -> u32 {
     (pte >> 10) & PTE_PPN_MASK
 }
 
+const fn access_bits_for(request: TranslationRequest) -> u32 {
+    PTE_A
+        | if matches!(request.access, MemoryAccess::Store) {
+            PTE_D
+        } else {
+            0
+        }
+}
+
+const fn needs_access_bit_update(request: TranslationRequest, flags: u32) -> bool {
+    (flags & access_bits_for(request)) != access_bits_for(request)
+}
+
+const fn updated_flags(request: TranslationRequest, flags: u32) -> u32 {
+    flags | access_bits_for(request)
+}
+
+const fn updated_pte(pte: u32, request: TranslationRequest) -> u32 {
+    pte | access_bits_for(request)
+}
+
 fn translate_leaf(state: WalkState, pte: u32) -> Option<u32> {
     let virtual_address = state.request.virtual_address;
     let offset = virtual_address & PAGE_OFFSET_MASK;
@@ -329,18 +426,12 @@ fn translate_leaf(state: WalkState, pte: u32) -> Option<u32> {
 
 const fn permissions_allow(request: TranslationRequest, flags: u32) -> bool {
     let user_page = (flags & PTE_U) != 0;
-    let accessed = (flags & PTE_A) != 0;
-    let dirty = (flags & PTE_D) != 0;
     let readable = (flags & PTE_R) != 0;
     let writable = (flags & PTE_W) != 0;
     let executable = (flags & PTE_X) != 0;
     let mxr = (request.status & MSTATUS_MXR) != 0;
     let sum = (request.status & MSTATUS_SUM) != 0;
     let load_permitted = readable || (mxr && executable);
-
-    if !accessed || (matches!(request.access, MemoryAccess::Store) && !dirty) {
-        return false;
-    }
 
     match request.privilege {
         PrivilegeMode::Machine => true,
@@ -388,6 +479,7 @@ mod tests {
     struct CountingBus {
         bytes: Vec<u8>,
         load32_count: u32,
+        store32_count: u32,
     }
 
     impl CountingBus {
@@ -395,6 +487,7 @@ mod tests {
             Self {
                 bytes: vec![0; size],
                 load32_count: 0,
+                store32_count: 0,
             }
         }
 
@@ -422,6 +515,12 @@ mod tests {
         fn load32(&mut self, addr: u64) -> Result<u32, BusError> {
             self.load32_count += 1;
             Ok(self.read_word(addr as u32))
+        }
+
+        fn store32(&mut self, addr: u64, value: u32) -> Result<(), BusError> {
+            self.store32_count += 1;
+            self.store_word(addr as u32, value);
+            Ok(())
         }
     }
 
@@ -451,6 +550,7 @@ mod tests {
             request,
             level: 1,
             pte_address: 0,
+            phase: WalkPhase::ReadPte,
         };
 
         assert!(translate_leaf(state, (1 << 10) | PTE_V | PTE_R | PTE_X | PTE_A).is_none());
@@ -592,6 +692,63 @@ mod tests {
 
         assert_eq!(translated, TranslationResult::PhysicalAddress(0x1123));
         assert_eq!(bus.load32_count, 4);
+    }
+
+    #[test]
+    fn load_translation_sets_accessed_bit() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Satp, sv32_satp(0x2000));
+        install_sv32_mapping(&mut bus, 0x2000, 0x3000, 0x4000, 0x1000, PTE_R);
+
+        let translated = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("load translation should update accessed bit");
+
+        assert_eq!(translated, TranslationResult::PhysicalAddress(0x1123));
+        assert_eq!(bus.read_word(0x3010) & PTE_A, PTE_A);
+        assert_eq!(bus.read_word(0x3010) & PTE_D, 0);
+        assert_eq!(bus.store32_count, 1);
+    }
+
+    #[test]
+    fn store_after_load_rewalks_to_set_dirty_bit() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Satp, sv32_satp(0x2000));
+        install_sv32_mapping(&mut bus, 0x2000, 0x3000, 0x4000, 0x1000, PTE_R | PTE_W);
+
+        let load = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("load translation should update accessed bit");
+        let store = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Store,
+            )
+            .expect("store translation should rewalk to update dirty bit");
+
+        assert_eq!(load, TranslationResult::PhysicalAddress(0x1123));
+        assert_eq!(store, TranslationResult::PhysicalAddress(0x1123));
+        assert_eq!(bus.read_word(0x3010) & (PTE_A | PTE_D), PTE_A | PTE_D);
+        assert_eq!(bus.store32_count, 2);
     }
 
     fn install_sv32_mapping(
