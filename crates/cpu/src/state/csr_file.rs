@@ -22,6 +22,7 @@ const MIE_STIE: u32 = 1 << 5;
 const MIE_SEIE: u32 = 1 << 9;
 const MIE_MEIE: u32 = 1 << 11;
 const MIE_MTIE: u32 = 1 << 7;
+const MIE_MASK: u32 = MIE_SSIE | MIE_MSIE | MIE_STIE | MIE_MTIE | MIE_SEIE | MIE_MEIE;
 const SIE_MASK: u32 = MIE_SSIE | MIE_STIE | MIE_SEIE;
 const MIP_SSIP: u32 = 1 << 1;
 const MIP_MSIP: u32 = 1 << 3;
@@ -33,6 +34,17 @@ const SIP_MASK: u32 = MIP_SSIP | MIP_STIP | MIP_SEIP;
 const MANAGED_INTERRUPT_MASK: u32 = MIP_SSIP | MIP_MSIP | MIP_STIP | MIP_MTIP | MIP_SEIP | MIP_MEIP;
 const MIP_WRITABLE_MASK: u32 = MIP_SSIP | MIP_MSIP;
 const SIP_WRITABLE_MASK: u32 = MIP_SSIP;
+// Only modeled exceptions that can arise below M-mode are delegatable.
+const MEDELEG_MASK: u32 = (1 << 0)
+    | (1 << 2)
+    | (1 << 3)
+    | (1 << 4)
+    | (1 << 6)
+    | (1 << 8)
+    | (1 << 9)
+    | (1 << 12)
+    | (1 << 13)
+    | (1 << 15);
 const MIDELEG_MASK: u32 = MIP_SSIP | MIP_STIP | MIP_SEIP;
 const COUNTEREN_CY: u32 = 1 << 0;
 const COUNTEREN_TM: u32 = 1 << 1;
@@ -131,9 +143,9 @@ impl CsrFile {
             CsrAddress::Scounteren => self.supervisor.scounteren = value & COUNTEREN_MASK,
             CsrAddress::Satp => self.supervisor.satp = value,
             CsrAddress::Mstatus => self.machine.mstatus = value,
-            CsrAddress::Medeleg => self.machine.medeleg = value,
+            CsrAddress::Medeleg => self.machine.medeleg = value & MEDELEG_MASK,
             CsrAddress::Mideleg => self.machine.mideleg = value & MIDELEG_MASK,
-            CsrAddress::Mie => self.machine.mie = value,
+            CsrAddress::Mie => self.machine.mie = value & MIE_MASK,
             CsrAddress::Mtvec => self.machine.mtvec = value,
             CsrAddress::Mcounteren => self.machine.mcounteren = value & COUNTEREN_MASK,
             CsrAddress::Mcycle | CsrAddress::Cycle | CsrAddress::Time => {
@@ -586,6 +598,31 @@ mod tests {
             csrs.read(CsrAddress::Mip) & (super::MIP_MSIP | super::MIP_SSIP),
             super::MIP_MSIP | super::MIP_SSIP
         );
+    }
+
+    #[test]
+    fn medeleg_write_masks_unsupported_and_machine_only_exception_bits() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Medeleg, u32::MAX);
+
+        assert_eq!(csrs.read(CsrAddress::Medeleg), super::MEDELEG_MASK);
+        assert_eq!(csrs.read(CsrAddress::Medeleg) & (1 << 11), 0);
+    }
+
+    #[test]
+    fn mideleg_write_masks_to_supervisor_interrupt_bits() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mideleg, u32::MAX);
+
+        assert_eq!(csrs.read(CsrAddress::Mideleg), super::MIDELEG_MASK);
+    }
+
+    #[test]
+    fn mie_write_masks_to_modeled_interrupt_bits() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mie, u32::MAX);
+
+        assert_eq!(csrs.read(CsrAddress::Mie), super::MIE_MASK);
     }
 
     #[test]

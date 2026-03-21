@@ -2338,6 +2338,53 @@ mod tests {
     }
 
     #[test]
+    fn delegates_user_illegal_instruction_to_supervisor_when_medeleg_is_set() {
+        let instruction = encode_csrrwi(1, rvsim_isa::CsrAddress::Mstatus as u16, 1);
+        let mut bus = TestBus::new(64);
+        bus.load_program(&[
+            instruction,
+            encode_jal(0, 0),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Medeleg, 1 << 2);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x20);
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("delegated illegal instruction should trap to supervisor through pipeline");
+        }
+
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Supervisor
+        );
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sepc), 0);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Scause),
+            2
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Stval),
+            instruction
+        );
+        assert_eq!(core.stats().trap_count, 1);
+    }
+
+    #[test]
     fn supervisor_satp_access_traps_when_tvm_is_set() {
         let instruction = encode_csrrw(1, rvsim_isa::CsrAddress::Satp as u16, 0);
         let mut bus = TestBus::new(0x10_000);

@@ -1608,6 +1608,43 @@ mod tests {
     }
 
     #[test]
+    fn delegates_user_illegal_instruction_to_supervisor_when_medeleg_is_set() {
+        let instruction = encode_csrrwi(1, rvsim_isa::CsrAddress::Mstatus as u16, 1);
+        let mut bus = TinyBus::default();
+        bus.load_program(&[instruction]);
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Medeleg, 1 << 2);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x20);
+
+        let cycle = core
+            .step_cycle(&mut bus)
+            .expect("delegated illegal instruction should trap to supervisor");
+
+        assert_eq!(cycle.retired_instructions, 0);
+        assert!(cycle.stalled);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Supervisor
+        );
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sepc), 0);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Scause),
+            2
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Stval),
+            instruction
+        );
+    }
+
+    #[test]
     fn supervisor_satp_access_traps_when_tvm_is_set() {
         let instruction = encode_csrrw(1, rvsim_isa::CsrAddress::Satp as u16, 0);
         let mut bus = TinyBus::default();
