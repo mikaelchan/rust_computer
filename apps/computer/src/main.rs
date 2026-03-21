@@ -2,7 +2,8 @@ use std::{cell::RefCell, rc::Rc};
 
 use rvsim_cpu::{CpuModel, ReferenceCore};
 use rvsim_devices::{
-    DmaController, Dram, DramConfig, InterruptController, MachineSoftwareInterrupt, Rom, SimpleUart,
+    BlockDevice, DmaController, Dram, DramConfig, InterruptController, MachineSoftwareInterrupt,
+    Rom, SimpleUart,
 };
 use rvsim_isa::CsrAddress;
 use rvsim_system::{
@@ -18,6 +19,7 @@ const UART_BASE: u64 = 0x2000_0000;
 const INTERRUPT_CONTROLLER_BASE: u64 = 0x4000_0000;
 const MSIP_BASE: u64 = 0x5000_0000;
 const DMA_BASE: u64 = 0x6000_0000;
+const BLOCK_DEVICE_BASE: u64 = 0x7000_0000;
 const DMA_SOURCE: u64 = RAM_BASE + 0x0040;
 const DMA_DESTINATION: u64 = RAM_BASE + 0x0080;
 
@@ -42,12 +44,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let dma = Rc::new(RefCell::new(DmaController::new(DMA_BASE)));
+    let mut block_device = BlockDevice::new(BLOCK_DEVICE_BASE, 4, 16, 3);
+    block_device.write_block_contents(
+        0,
+        &[
+            0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55, 0xcc, 0xbb, 0xaa, 0x99, 0x00, 0xff,
+            0xee, 0xdd,
+        ],
+    )?;
+
     let mut memory = MemoryMap::new();
     memory.map_device(Rom::from_words(RESET_VECTOR as u64, &program))?;
     memory.map_device(Dram::new(RAM_BASE, 0x1000, DramConfig::new(64, 6, 2, 1)))?;
     memory.map_device(SimpleUart::new(UART_BASE))?;
     memory.map_device(InterruptController::new(INTERRUPT_CONTROLLER_BASE))?;
     memory.map_device(MachineSoftwareInterrupt::new(MSIP_BASE))?;
+    memory.map_device(block_device)?;
     memory.map_shared_device(Rc::clone(&dma))?;
 
     let mut fabric = ArbiterBus::new(memory);
@@ -155,6 +167,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dma_word1 = host_load32(&mut machine, DMA_DESTINATION + 4)?;
     let dma_status = host_load32(&mut machine, DMA_BASE + DmaController::CONTROL_OFFSET)?;
     let dma_transferred = host_load32(&mut machine, DMA_BASE + DmaController::TRANSFERRED_OFFSET)?;
+    host_store32(
+        &mut machine,
+        BLOCK_DEVICE_BASE + BlockDevice::BLOCK_INDEX_OFFSET,
+        0,
+    )?;
+    host_store32(
+        &mut machine,
+        BLOCK_DEVICE_BASE + BlockDevice::CONTROL_OFFSET,
+        BlockDevice::CONTROL_START_READ,
+    )?;
+    let block_status = loop {
+        let status = host_load32(
+            &mut machine,
+            BLOCK_DEVICE_BASE + BlockDevice::CONTROL_OFFSET,
+        )?;
+        if (status & BlockDevice::STATUS_DONE) != 0 {
+            break status;
+        }
+        let _ = step_machine(&mut machine)?;
+    };
+    let block_word0 = host_load32(
+        &mut machine,
+        BLOCK_DEVICE_BASE + BlockDevice::DATA_WINDOW_OFFSET,
+    )?;
+    let block_word1 = host_load32(
+        &mut machine,
+        BLOCK_DEVICE_BASE + BlockDevice::DATA_WINDOW_OFFSET + 4,
+    )?;
     let arbiter_stats = machine.bus().inner().inner().stats();
 
     println!(
@@ -210,9 +250,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dma_word0,
         dma_word1
     );
+    println!(
+        "block device: status=0x{:08x} word0=0x{:08x} word1=0x{:08x}",
+        block_status, block_word0, block_word1
+    );
 
     println!(
-        "computer ready: ReferenceCore now demonstrates split L1 caches over a unified L2, software-managed DMA cache maintenance, DMA bus arbitration, and external plus software interrupts"
+        "computer ready: ReferenceCore now demonstrates split L1 caches over a unified L2, software-managed DMA cache maintenance, DMA bus arbitration, a RAM-backed block device, and external plus software interrupts"
     );
 
     Ok(())

@@ -1,5 +1,6 @@
 //! Memory-mapped device implementations used by the computer model.
 
+pub mod block_device;
 pub mod dma_controller;
 pub mod dram;
 pub mod interrupt_controller;
@@ -10,6 +11,7 @@ pub mod ram;
 pub mod rom;
 pub mod simple_uart;
 
+pub use block_device::BlockDevice;
 pub use dma_controller::DmaController;
 pub use dram::{Dram, DramConfig};
 pub use interrupt_controller::InterruptController;

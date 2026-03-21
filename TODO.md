@@ -59,8 +59,8 @@ The current baseline already has:
 - [x] Add cache maintenance or coherent DMA behavior.
   Cache wrappers now expose software-managed `write_back_range` and `invalidate_range` hooks that recurse through the cache hierarchy, so cached DMA buffers can be synchronized explicitly even though the DMA path is still non-coherent.
 
-- [ ] Expand MMIO device coverage.
-  Good candidates: block device, display/framebuffer, keyboard/input source, programmable timer variants, and storage-oriented test devices.
+- [x] Expand MMIO device coverage.
+  `rvsim-devices` now includes a RAM-backed MMIO block device with fixed command latency, a one-block staging window, and optional completion interrupts for storage-oriented experiments. Future display and input devices can still build on the same MMIO patterns.
 
 ## CPU And Privilege
 
