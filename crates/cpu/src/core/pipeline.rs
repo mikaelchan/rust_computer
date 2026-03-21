@@ -1914,6 +1914,61 @@ mod tests {
     }
 
     #[test]
+    fn machine_mode_can_write_and_read_mcycleh() {
+        let mut bus = TestBus::new(64);
+        bus.load_program(&[
+            encode_csrrwi(0, rvsim_isa::CsrAddress::Mcycleh as u16, 1),
+            encode_csrrs(1, rvsim_isa::CsrAddress::Mcycleh as u16, 0),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+
+        for _ in 0..12 {
+            core.step_cycle(&mut bus)
+                .expect("mcycleh access should execute through pipeline");
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 1);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcycleh),
+            1
+        );
+    }
+
+    #[test]
+    fn user_cycleh_reads_high_counter_bits_when_enabled() {
+        let mut bus = TestBus::new(64);
+        bus.load_program(&[
+            encode_csrrs(1, rvsim_isa::CsrAddress::Cycleh as u16, 0),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mcounteren, 1 << 0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Scounteren, 1 << 0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mcycleh, 1);
+
+        for _ in 0..12 {
+            core.step_cycle(&mut bus)
+                .expect("user cycleh read should execute through pipeline");
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 1);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Cycleh),
+            1
+        );
+    }
+
+    #[test]
     fn user_instret_reads_succeed_and_minstret_tracks_retired_instructions() {
         let mut bus = TestBus::new(64);
         bus.load_program(&[

@@ -54,8 +54,8 @@ pub struct MachineCsrs {
     pub mie: u32,
     pub mtvec: u32,
     pub mcounteren: u32,
-    pub mcycle: u32,
-    pub minstret: u32,
+    pub mcycle: u64,
+    pub minstret: u64,
     pub mepc: u32,
     pub mcause: u32,
     pub mtval: u32,
@@ -95,10 +95,14 @@ impl CsrFile {
             CsrAddress::Mie => self.machine.mie,
             CsrAddress::Mtvec => self.machine.mtvec,
             CsrAddress::Mcounteren => self.machine.mcounteren,
-            CsrAddress::Mcycle => self.machine.mcycle,
-            CsrAddress::Minstret => self.machine.minstret,
-            CsrAddress::Cycle | CsrAddress::Time => self.machine.mcycle,
-            CsrAddress::Instret => self.machine.minstret,
+            CsrAddress::Mcycle => low_half(self.machine.mcycle),
+            CsrAddress::Minstret => low_half(self.machine.minstret),
+            CsrAddress::Mcycleh => high_half(self.machine.mcycle),
+            CsrAddress::Minstreth => high_half(self.machine.minstret),
+            CsrAddress::Cycle | CsrAddress::Time => low_half(self.machine.mcycle),
+            CsrAddress::Instret => low_half(self.machine.minstret),
+            CsrAddress::Cycleh | CsrAddress::Timeh => high_half(self.machine.mcycle),
+            CsrAddress::Instreth => high_half(self.machine.minstret),
             CsrAddress::Sepc => self.supervisor.sepc,
             CsrAddress::Scause => self.supervisor.scause,
             CsrAddress::Stval => self.supervisor.stval,
@@ -128,10 +132,18 @@ impl CsrFile {
             CsrAddress::Mie => self.machine.mie = value,
             CsrAddress::Mtvec => self.machine.mtvec = value,
             CsrAddress::Mcounteren => self.machine.mcounteren = value & COUNTEREN_MASK,
-            CsrAddress::Mcycle => self.machine.mcycle = value,
-            CsrAddress::Minstret => self.machine.minstret = value,
-            CsrAddress::Cycle | CsrAddress::Time => self.machine.mcycle = value,
-            CsrAddress::Instret => self.machine.minstret = value,
+            CsrAddress::Mcycle | CsrAddress::Cycle | CsrAddress::Time => {
+                write_low_half(&mut self.machine.mcycle, value);
+            }
+            CsrAddress::Minstret | CsrAddress::Instret => {
+                write_low_half(&mut self.machine.minstret, value);
+            }
+            CsrAddress::Mcycleh | CsrAddress::Cycleh | CsrAddress::Timeh => {
+                write_high_half(&mut self.machine.mcycle, value);
+            }
+            CsrAddress::Minstreth | CsrAddress::Instreth => {
+                write_high_half(&mut self.machine.minstret, value);
+            }
             CsrAddress::Sepc => self.supervisor.sepc = value,
             CsrAddress::Scause => self.supervisor.scause = value,
             CsrAddress::Stval => self.supervisor.stval = value,
@@ -160,7 +172,7 @@ impl CsrFile {
     }
 
     pub fn increment_instret(&mut self, retired: u64) {
-        self.machine.minstret = self.machine.minstret.wrapping_add(retired as u32);
+        self.machine.minstret = self.machine.minstret.wrapping_add(retired);
     }
 
     pub fn sync_interrupts(&mut self, interrupts: InterruptSet) {
@@ -429,6 +441,22 @@ impl CsrFile {
     }
 }
 
+const fn low_half(value: u64) -> u32 {
+    value as u32
+}
+
+const fn high_half(value: u64) -> u32 {
+    (value >> 32) as u32
+}
+
+fn write_low_half(target: &mut u64, value: u32) {
+    *target = (*target & !0xffff_ffff) | u64::from(value);
+}
+
+fn write_high_half(target: &mut u64, value: u32) {
+    *target = (u64::from(value) << 32) | (*target & 0xffff_ffff);
+}
+
 const fn set_flag(value: u32, mask: u32, enabled: bool) -> u32 {
     if enabled { value | mask } else { value & !mask }
 }
@@ -689,11 +717,11 @@ mod tests {
     fn supervisor_counter_access_requires_mcounteren() {
         let mut csrs = CsrFile::default();
 
-        assert!(!csrs.allows_csr_access(PrivilegeMode::Supervisor, CsrAddress::Cycle));
+        assert!(!csrs.allows_csr_access(PrivilegeMode::Supervisor, CsrAddress::Cycleh));
 
         csrs.write(CsrAddress::Mcounteren, super::COUNTEREN_CY);
 
-        assert!(csrs.allows_csr_access(PrivilegeMode::Supervisor, CsrAddress::Cycle));
+        assert!(csrs.allows_csr_access(PrivilegeMode::Supervisor, CsrAddress::Cycleh));
     }
 
     #[test]
@@ -701,21 +729,45 @@ mod tests {
         let mut csrs = CsrFile::default();
 
         csrs.write(CsrAddress::Mcounteren, super::COUNTEREN_IR);
-        assert!(!csrs.allows_csr_access(PrivilegeMode::User, CsrAddress::Instret));
+        assert!(!csrs.allows_csr_access(PrivilegeMode::User, CsrAddress::Instreth));
 
         csrs.write(CsrAddress::Scounteren, super::COUNTEREN_IR);
-        assert!(csrs.allows_csr_access(PrivilegeMode::User, CsrAddress::Instret));
+        assert!(csrs.allows_csr_access(PrivilegeMode::User, CsrAddress::Instreth));
     }
 
     #[test]
-    fn counter_shadows_reflect_machine_counters_and_time_follows_cycle_domain() {
+    fn counter_shadows_reflect_both_halves_and_time_follows_cycle_domain() {
         let mut csrs = CsrFile::default();
         csrs.write(CsrAddress::Mcycle, 7);
+        csrs.write(CsrAddress::Mcycleh, 1);
         csrs.write(CsrAddress::Minstret, 3);
+        csrs.write(CsrAddress::Minstreth, 2);
 
         assert_eq!(csrs.read(CsrAddress::Cycle), 7);
         assert_eq!(csrs.read(CsrAddress::Time), 7);
+        assert_eq!(csrs.read(CsrAddress::Cycleh), 1);
+        assert_eq!(csrs.read(CsrAddress::Timeh), 1);
         assert_eq!(csrs.read(CsrAddress::Instret), 3);
+        assert_eq!(csrs.read(CsrAddress::Instreth), 2);
+    }
+
+    #[test]
+    fn counter_high_halves_preserve_other_half_on_write_and_increment_carries() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mcycleh, 4);
+        csrs.write(CsrAddress::Mcycle, u32::MAX);
+        csrs.write(CsrAddress::Minstreth, 7);
+        csrs.write(CsrAddress::Minstret, u32::MAX);
+
+        csrs.increment_cycle();
+        csrs.increment_instret(2);
+
+        assert_eq!(csrs.read(CsrAddress::Mcycle), 0);
+        assert_eq!(csrs.read(CsrAddress::Mcycleh), 5);
+        assert_eq!(csrs.read(CsrAddress::Time), 0);
+        assert_eq!(csrs.read(CsrAddress::Timeh), 5);
+        assert_eq!(csrs.read(CsrAddress::Minstret), 1);
+        assert_eq!(csrs.read(CsrAddress::Minstreth), 8);
     }
 
     #[test]
