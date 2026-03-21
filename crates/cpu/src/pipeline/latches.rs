@@ -1,6 +1,6 @@
 use rvsim_isa::DecodedInstruction;
 
-use crate::exec::csr::CsrWrite;
+use crate::{exec::csr::CsrWrite, mmu::TranslationFence};
 
 /// IF-stage payload carried into decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +39,7 @@ pub struct ExMemPayload {
     pub decoded: DecodedInstruction,
     pub writeback_value: Option<u32>,
     pub csr_write: Option<CsrWrite>,
+    pub translation_fence: Option<TranslationFence>,
     pub memory_address: Option<u32>,
     pub store_value: u32,
     pub next_pc: u32,
@@ -56,6 +57,7 @@ pub struct MemWbPayload {
     pub decoded: DecodedInstruction,
     pub writeback_value: Option<u32>,
     pub csr_write: Option<CsrWrite>,
+    pub translation_fence: Option<TranslationFence>,
     pub next_pc: u32,
 }
 

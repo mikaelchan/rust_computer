@@ -77,7 +77,7 @@ The current baseline already has:
   The CPU now performs `Sv32` instruction and data address translation from `satp`, walks page tables across cycles, and raises instruction/load/store page faults through the existing trap machinery in both CPU models.
 
 - [ ] Extend virtual memory beyond the first slice.
-  TLBs, `sfence.vma`, hardware-managed A/D bits, and the first `SUM`/`MXR` supervisor permission controls are now in place. Finer-grained `sfence.vma` behavior, ASID-aware experiments, and broader page-table studies remain future work.
+  TLBs, selective `sfence.vma`, hardware-managed A/D bits, and the first `SUM`/`MXR` supervisor permission controls are now in place. Broader ASID experiments and wider page-table studies remain future work.
 
 - [ ] Keep the out-of-order path separate until the memory system is ready.
   OOO remains a future milestone, but it should not move ahead of the remaining cache/bus foundations.

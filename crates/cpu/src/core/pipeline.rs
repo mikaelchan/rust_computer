@@ -335,6 +335,7 @@ impl Processor for PipelineCore {
                             decoded: payload.decoded,
                             writeback_value: outcome.writeback_value,
                             csr_write: outcome.csr_write,
+                            translation_fence: outcome.translation_fence,
                             memory_address: outcome.memory_address,
                             store_value: outcome.store_value,
                             next_pc: outcome.next_pc,
@@ -1015,7 +1016,7 @@ mod tests {
                 encode_lw(2, 1, 0),
                 encode_addi(0, 0, 0),
                 encode_addi(0, 0, 0),
-                encode_sfence_vma(),
+                encode_sfence_vma(0, 0),
                 encode_lw(3, 1, 0),
                 encode_jal(0, 0),
             ],
@@ -1070,6 +1071,94 @@ mod tests {
         }
 
         assert_eq!(core.hart_state().registers.read(3), 9);
+        assert_eq!(core.stats().translation_barrier_flushes, 1);
+    }
+
+    #[test]
+    fn sfence_vma_can_flush_one_virtual_address_only() {
+        let mut bus = TestBus::new(0x10_000);
+        bus.store_words(
+            0x0000,
+            &[
+                encode_lui(1, 0x8),
+                encode_lw(2, 1, 0),
+                encode_lui(3, 0x9),
+                encode_lw(4, 3, 0),
+                encode_sfence_vma(1, 0),
+                encode_lw(5, 1, 0),
+                encode_lw(6, 3, 0),
+                encode_jal(0, 0),
+            ],
+        );
+        bus.store_word(0x1000, 5);
+        bus.store_word(0x5000, 7);
+        bus.store_word(0x7000, 11);
+        bus.store_word(0x8000, 13);
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x0000,
+            PTE_R | PTE_X | PTE_A,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x9000,
+            0x5000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        let mut core = PipelineCore::new(0x4000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+
+        for _ in 0..10 {
+            core.step_cycle(&mut bus)
+                .expect("initial translated loads should execute");
+            if core.hart_state().registers.read(4) == 7 {
+                break;
+            }
+        }
+        assert_eq!(core.hart_state().registers.read(2), 5);
+        assert_eq!(core.hart_state().registers.read(4), 7);
+
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x7000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x9000,
+            0x8000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        for _ in 0..12 {
+            core.step_cycle(&mut bus)
+                .expect("selective sfence.vma should execute");
+        }
+
+        assert_eq!(core.hart_state().registers.read(5), 11);
+        assert_eq!(core.hart_state().registers.read(6), 7);
         assert_eq!(core.stats().translation_barrier_flushes, 1);
     }
 
@@ -1844,8 +1933,8 @@ mod tests {
         0x1020_0073
     }
 
-    fn encode_sfence_vma() -> u32 {
-        0x1200_0073
+    fn encode_sfence_vma(rs1: u8, rs2: u8) -> u32 {
+        0x1200_0073 | ((rs1 as u32) << 15) | ((rs2 as u32) << 20)
     }
 
     fn install_sv32_mapping(

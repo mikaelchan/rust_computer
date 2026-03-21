@@ -24,11 +24,8 @@ pub fn write_back(
         let _result = return_from_trap(state, system_kind);
         state.pc
     } else {
-        if matches!(
-            payload.decoded.kind,
-            rvsim_isa::InstructionKind::System(SystemKind::SfenceVma)
-        ) {
-            walker.flush();
+        if let Some(fence) = payload.translation_fence {
+            walker.flush_fence(fence);
         }
 
         if let Some(write) = payload.csr_write {

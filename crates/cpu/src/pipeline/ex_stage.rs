@@ -2,6 +2,7 @@ use rvsim_isa::{AluOp, DecodedInstruction, Exception, SystemKind, Trap, opcode::
 
 use crate::{
     exec::{alu, branch, csr, load_store},
+    mmu::TranslationFence,
     state::{CsrFile, PrivilegeMode},
 };
 
@@ -10,6 +11,7 @@ use crate::{
 pub struct ExecuteOutcome {
     pub writeback_value: Option<u32>,
     pub csr_write: Option<csr::CsrWrite>,
+    pub translation_fence: Option<TranslationFence>,
     pub memory_address: Option<u32>,
     pub store_value: u32,
     pub next_pc: u32,
@@ -69,6 +71,7 @@ pub fn execute(
         InstructionKind::Lui => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: Some(decoded.imm as u32),
             csr_write: None,
+            translation_fence: None,
             memory_address: None,
             store_value: 0,
             next_pc,
@@ -76,6 +79,7 @@ pub fn execute(
         InstructionKind::Auipc => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: Some(decoded.pc.wrapping_add_signed(decoded.imm)),
             csr_write: None,
+            translation_fence: None,
             memory_address: None,
             store_value: 0,
             next_pc,
@@ -83,6 +87,7 @@ pub fn execute(
         InstructionKind::Jal => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: Some(next_pc),
             csr_write: None,
+            translation_fence: None,
             memory_address: None,
             store_value: 0,
             next_pc: branch::branch_target(decoded.pc, decoded.imm),
@@ -90,6 +95,7 @@ pub fn execute(
         InstructionKind::Jalr => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: Some(next_pc),
             csr_write: None,
+            translation_fence: None,
             memory_address: None,
             store_value: 0,
             next_pc: load_store::effective_address(rs1_value, decoded.imm) & !1,
@@ -97,6 +103,7 @@ pub fn execute(
         InstructionKind::Branch(branch_kind) => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: None,
             csr_write: None,
+            translation_fence: None,
             memory_address: None,
             store_value: 0,
             next_pc: if branch::branch_taken(branch_kind, rs1_value, rs2_value) {
@@ -108,6 +115,7 @@ pub fn execute(
         InstructionKind::Load(_) => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: None,
             csr_write: None,
+            translation_fence: None,
             memory_address: Some(load_store::effective_address(rs1_value, decoded.imm)),
             store_value: 0,
             next_pc,
@@ -115,6 +123,7 @@ pub fn execute(
         InstructionKind::Store(_) => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: None,
             csr_write: None,
+            translation_fence: None,
             memory_address: Some(load_store::effective_address(rs1_value, decoded.imm)),
             store_value: rs2_value,
             next_pc,
@@ -122,6 +131,7 @@ pub fn execute(
         InstructionKind::OpImm(op) => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: Some(alu::execute_alu(op, rs1_value, immediate_rhs(op, decoded))),
             csr_write: None,
+            translation_fence: None,
             memory_address: None,
             store_value: 0,
             next_pc,
@@ -129,6 +139,7 @@ pub fn execute(
         InstructionKind::Op(op) => ExecuteEvent::Advance(ExecuteOutcome {
             writeback_value: Some(alu::execute_alu(op, rs1_value, rs2_value)),
             csr_write: None,
+            translation_fence: None,
             memory_address: None,
             store_value: 0,
             next_pc,
@@ -147,6 +158,7 @@ pub fn execute(
             ExecuteEvent::Advance(ExecuteOutcome {
                 writeback_value: Some(outcome.read_value),
                 csr_write: outcome.write,
+                translation_fence: None,
                 memory_address: None,
                 store_value: 0,
                 next_pc,
@@ -172,6 +184,12 @@ pub fn execute(
             ExecuteEvent::Advance(ExecuteOutcome {
                 writeback_value: None,
                 csr_write: None,
+                translation_fence: Some(TranslationFence::from_operands(
+                    decoded.rs1,
+                    rs1_value,
+                    decoded.rs2,
+                    rs2_value,
+                )),
                 memory_address: None,
                 store_value: 0,
                 next_pc,
@@ -187,6 +205,7 @@ pub fn execute(
             ExecuteEvent::Advance(ExecuteOutcome {
                 writeback_value: None,
                 csr_write: None,
+                translation_fence: None,
                 memory_address: None,
                 store_value: 0,
                 next_pc: csrs.read(rvsim_isa::CsrAddress::Mepc),
@@ -202,6 +221,7 @@ pub fn execute(
             ExecuteEvent::Advance(ExecuteOutcome {
                 writeback_value: None,
                 csr_write: None,
+                translation_fence: None,
                 memory_address: None,
                 store_value: 0,
                 next_pc: csrs.read(rvsim_isa::CsrAddress::Sepc),

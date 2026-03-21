@@ -13,7 +13,7 @@ use rvsim_system::{Bus, BusError};
 
 use crate::{
     core::CpuError,
-    mmu::{MemoryAccess, PageWalker, TranslationResult},
+    mmu::{MemoryAccess, PageWalker, TranslationFence, TranslationResult},
     state::{HartState, PrivilegeMode},
 };
 
@@ -237,7 +237,12 @@ pub fn execute_decoded(
                     current_pc,
                 ));
             }
-            walker.flush();
+            walker.flush_fence(TranslationFence::from_operands(
+                decoded.rs1,
+                rs1_value,
+                decoded.rs2,
+                rs2_value,
+            ));
             state.pc = next_pc;
         }
         InstructionKind::System(SystemKind::Mret) => {

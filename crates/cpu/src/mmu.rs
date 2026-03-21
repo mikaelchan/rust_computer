@@ -11,6 +11,8 @@ const SUPERPAGE_SIZE: u32 = 1 << SUPERPAGE_SHIFT;
 const SUPERPAGE_OFFSET_MASK: u32 = SUPERPAGE_SIZE - 1;
 const SATP_MODE_SHIFT: u32 = 31;
 const SATP_MODE_SV32: u32 = 1;
+const SATP_ASID_SHIFT: u32 = 22;
+const SATP_ASID_MASK: u32 = (1 << 9) - 1;
 const SATP_PPN_MASK: u32 = (1 << 22) - 1;
 const MSTATUS_SUM: u32 = 1 << 18;
 const MSTATUS_MXR: u32 = 1 << 19;
@@ -37,6 +39,12 @@ pub enum TranslationResult {
     PhysicalAddress(u32),
     Stall,
     PageFault(Trap),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranslationFence {
+    virtual_address: Option<u32>,
+    asid: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +105,20 @@ impl PageWalker {
     }
 
     pub fn flush(&mut self) {
-        self.tlb = [None; TLB_ENTRY_COUNT];
+        self.flush_fence(TranslationFence::all());
+    }
+
+    pub fn flush_fence(&mut self, fence: TranslationFence) {
+        if fence.is_global() {
+            self.tlb = [None; TLB_ENTRY_COUNT];
+            return;
+        }
+
+        for slot in &mut self.tlb {
+            if slot.is_some_and(|entry| fence.matches_entry(entry)) {
+                *slot = None;
+            }
+        }
     }
 
     pub fn translate(
@@ -343,6 +364,52 @@ impl Default for PageWalker {
     }
 }
 
+impl TranslationFence {
+    #[must_use]
+    pub const fn all() -> Self {
+        Self {
+            virtual_address: None,
+            asid: None,
+        }
+    }
+
+    #[must_use]
+    pub fn from_operands(rs1: Option<u8>, rs1_value: u32, rs2: Option<u8>, rs2_value: u32) -> Self {
+        Self {
+            virtual_address: match rs1 {
+                Some(0) | None => None,
+                Some(_) => Some(rs1_value),
+            },
+            asid: match rs2 {
+                Some(0) | None => None,
+                Some(_) => Some((rs2_value & SATP_ASID_MASK) as u16),
+            },
+        }
+    }
+
+    const fn is_global(self) -> bool {
+        self.virtual_address.is_none() && self.asid.is_none()
+    }
+
+    const fn matches_entry(self, entry: TlbEntry) -> bool {
+        self.matches_asid(entry.satp) && self.matches_virtual_address(entry)
+    }
+
+    const fn matches_asid(self, satp: u32) -> bool {
+        match self.asid {
+            Some(asid) => satp_asid(satp) == asid,
+            None => true,
+        }
+    }
+
+    const fn matches_virtual_address(self, entry: TlbEntry) -> bool {
+        match self.virtual_address {
+            Some(virtual_address) => (virtual_address & !entry.page_mask) == entry.virtual_base,
+            None => true,
+        }
+    }
+}
+
 impl TlbEntry {
     const fn matches(self, request: TranslationRequest) -> bool {
         self.satp == request.satp
@@ -356,6 +423,10 @@ impl TlbEntry {
 
 const fn translation_enabled(satp: u32, privilege: PrivilegeMode) -> bool {
     !matches!(privilege, PrivilegeMode::Machine) && (satp >> SATP_MODE_SHIFT) == SATP_MODE_SV32
+}
+
+const fn satp_asid(satp: u32) -> u16 {
+    ((satp >> SATP_ASID_SHIFT) & SATP_ASID_MASK) as u16
 }
 
 fn translation_status(csrs: &CsrFile) -> u32 {
@@ -695,6 +766,104 @@ mod tests {
     }
 
     #[test]
+    fn selective_flush_can_target_one_asid() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x4000,
+            0x2000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        csrs.write(CsrAddress::Satp, sv32_satp_with_asid(0x2000, 1));
+        let first = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("asid 1 translation should succeed");
+
+        csrs.write(CsrAddress::Satp, sv32_satp_with_asid(0x5000, 2));
+        let second = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("asid 2 translation should succeed");
+
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x3000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x4000,
+            0x4000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        walker.flush_fence(TranslationFence::from_operands(Some(0), 0, Some(2), 2));
+
+        csrs.write(CsrAddress::Satp, sv32_satp_with_asid(0x2000, 1));
+        let first_after_flush = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("asid 1 entry should remain cached");
+
+        csrs.write(CsrAddress::Satp, sv32_satp_with_asid(0x5000, 2));
+        let second_after_flush = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("asid 2 entry should be reloaded");
+
+        assert_eq!(first, TranslationResult::PhysicalAddress(0x1123));
+        assert_eq!(second, TranslationResult::PhysicalAddress(0x2123));
+        assert_eq!(
+            first_after_flush,
+            TranslationResult::PhysicalAddress(0x1123)
+        );
+        assert_eq!(
+            second_after_flush,
+            TranslationResult::PhysicalAddress(0x4123)
+        );
+        assert_eq!(bus.load32_count, 6);
+    }
+
+    #[test]
     fn load_translation_sets_accessed_bit() {
         let mut bus = CountingBus::new(0x10_000);
         let mut walker = PageWalker::default();
@@ -778,5 +947,11 @@ mod tests {
 
     const fn sv32_satp(root_table: u32) -> u32 {
         (SATP_MODE_SV32 << SATP_MODE_SHIFT) | (root_table >> 12)
+    }
+
+    const fn sv32_satp_with_asid(root_table: u32, asid: u32) -> u32 {
+        (SATP_MODE_SV32 << SATP_MODE_SHIFT)
+            | ((asid & SATP_ASID_MASK) << SATP_ASID_SHIFT)
+            | (root_table >> 12)
     }
 }

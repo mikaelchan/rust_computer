@@ -134,16 +134,23 @@ pub fn decode(raw: u32, pc: u32) -> Result<DecodedInstruction, DecodeError> {
             0,
             None,
         )),
-        0x73 if funct3 == 0 => Ok(DecodedInstruction::new(
-            raw,
-            pc,
-            InstructionKind::System(decode_system(raw)?),
-            None,
-            None,
-            None,
-            0,
-            None,
-        )),
+        0x73 if funct3 == 0 => {
+            let kind = decode_system(raw)?;
+            let (system_rs1, system_rs2) = match kind {
+                SystemKind::SfenceVma => (Some(rs1), Some(rs2)),
+                _ => (None, None),
+            };
+            Ok(DecodedInstruction::new(
+                raw,
+                pc,
+                InstructionKind::System(kind),
+                None,
+                system_rs1,
+                system_rs2,
+                0,
+                None,
+            ))
+        }
         0x73 => Ok(DecodedInstruction::new(
             raw,
             pc,
@@ -225,9 +232,9 @@ fn decode_system(raw: u32) -> Result<SystemKind, DecodeError> {
     match raw {
         0x0000_0073 => Ok(SystemKind::Ecall),
         0x0010_0073 => Ok(SystemKind::Ebreak),
-        0x1200_0073 => Ok(SystemKind::SfenceVma),
         0x1020_0073 => Ok(SystemKind::Sret),
         0x3020_0073 => Ok(SystemKind::Mret),
+        _ if (raw & 0xfe00_7fff) == 0x1200_0073 => Ok(SystemKind::SfenceVma),
         _ => Err(DecodeError::new(raw)),
     }
 }
@@ -318,8 +325,10 @@ mod tests {
 
     #[test]
     fn decode_sfence_vma() {
-        let decoded = decode(0x1200_0073, 0).expect("sfence.vma should decode");
+        let decoded = decode(0x1220_8073, 0).expect("sfence.vma should decode");
         assert_eq!(decoded.kind, InstructionKind::System(SystemKind::SfenceVma));
+        assert_eq!(decoded.rs1, Some(1));
+        assert_eq!(decoded.rs2, Some(2));
     }
 
     #[test]

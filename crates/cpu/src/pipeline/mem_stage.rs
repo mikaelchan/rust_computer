@@ -43,6 +43,7 @@ pub fn access(
                     decoded: payload.decoded,
                     writeback_value: Some(value),
                     csr_write: payload.csr_write,
+                    translation_fence: payload.translation_fence,
                     next_pc: payload.next_pc,
                 })),
                 Err(BusError::Busy { .. }) => Ok(MemoryEvent::Stall(payload)),
@@ -77,6 +78,7 @@ pub fn access(
                     decoded: payload.decoded,
                     writeback_value: None,
                     csr_write: payload.csr_write,
+                    translation_fence: payload.translation_fence,
                     next_pc: payload.next_pc,
                 })),
                 Err(BusError::Busy { .. }) => Ok(MemoryEvent::Stall(payload)),
@@ -92,6 +94,7 @@ pub fn access(
             decoded: payload.decoded,
             writeback_value: payload.writeback_value,
             csr_write: payload.csr_write,
+            translation_fence: payload.translation_fence,
             next_pc: payload.next_pc,
         })),
     }
