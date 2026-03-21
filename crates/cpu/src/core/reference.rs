@@ -1799,6 +1799,65 @@ mod tests {
     }
 
     #[test]
+    fn machine_interrupt_uses_vectored_mtvec_base() {
+        let mut bus = InterruptBus {
+            pending_interrupts: InterruptSet::from(InterruptLine::MachineSoftware),
+        };
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x40 | 0b01);
+
+        let report = core
+            .step_cycle(&mut bus)
+            .expect("vectored machine interrupt should trap");
+
+        assert_eq!(report.retired_instructions, 0);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().pc, 0x40 + (3 * 4));
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 0);
+    }
+
+    #[test]
+    fn delegated_supervisor_interrupt_uses_vectored_stvec_base() {
+        let mut bus = InterruptBus {
+            pending_interrupts: InterruptSet::from(InterruptLine::SupervisorExternal),
+        };
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mideleg, 1 << 9);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sie, 1 << 9);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x80 | 0b01);
+
+        let report = core
+            .step_cycle(&mut bus)
+            .expect("vectored supervisor interrupt should trap");
+
+        assert_eq!(report.retired_instructions, 0);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Supervisor
+        );
+        assert_eq!(core.hart_state().pc, 0x80 + (9 * 4));
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sepc), 0);
+    }
+
+    #[test]
     fn interrupt_priority_prefers_machine_external_over_software_and_timer() {
         let mut bus = InterruptBus {
             pending_interrupts: InterruptSet::from(InterruptLine::MachineSoftware)

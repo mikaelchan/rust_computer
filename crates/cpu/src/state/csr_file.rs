@@ -618,6 +618,23 @@ mod tests {
     }
 
     #[test]
+    fn machine_interrupt_uses_vectored_mtvec_offset() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mtvec, 0x40 | 0b01);
+
+        let (privilege, handler_pc) = csrs.enter_trap(
+            Trap::Interrupt(Interrupt::MachineSoftware),
+            0x18,
+            PrivilegeMode::User,
+        );
+
+        assert_eq!(privilege, PrivilegeMode::Machine);
+        assert_eq!(handler_pc, 0x40 + (3 * 4));
+        assert_eq!(csrs.read(CsrAddress::Mcause), (1 << 31) | 3);
+        assert_eq!(csrs.read(CsrAddress::Mepc), 0x18);
+    }
+
+    #[test]
     fn delegated_supervisor_interrupt_enters_supervisor_trap_state() {
         let mut csrs = CsrFile::default();
         csrs.write(CsrAddress::Mideleg, 1 << 1);
@@ -636,6 +653,25 @@ mod tests {
         assert_eq!(csrs.read(CsrAddress::Scause), (1 << 31) | 1);
         assert_eq!(csrs.read(CsrAddress::Stval), 0);
         assert_eq!(csrs.read(CsrAddress::Sstatus) & (1 << 5), 0);
+    }
+
+    #[test]
+    fn delegated_supervisor_interrupt_uses_vectored_stvec_offset() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mideleg, 1 << 9);
+        csrs.write(CsrAddress::Stvec, 0x80 | 0b01);
+        csrs.write(CsrAddress::Sie, 1 << 9);
+
+        let (privilege, handler_pc) = csrs.enter_trap(
+            Trap::Interrupt(Interrupt::SupervisorExternal),
+            0x24,
+            PrivilegeMode::User,
+        );
+
+        assert_eq!(privilege, PrivilegeMode::Supervisor);
+        assert_eq!(handler_pc, 0x80 + (9 * 4));
+        assert_eq!(csrs.read(CsrAddress::Scause), (1 << 31) | 9);
+        assert_eq!(csrs.read(CsrAddress::Sepc), 0x24);
     }
 
     #[test]

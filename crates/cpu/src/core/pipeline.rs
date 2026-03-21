@@ -1691,6 +1691,67 @@ mod tests {
     }
 
     #[test]
+    fn machine_interrupt_uses_vectored_mtvec_base() {
+        let mut bus = TestBus::new(64);
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::MachineSoftware);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x40 | 0b01);
+
+        let cycle = core
+            .step_cycle(&mut bus)
+            .expect("vectored machine interrupt should trap through pipeline");
+
+        assert_eq!(cycle.retired_instructions, 0);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().pc, 0x40 + (3 * 4));
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 0);
+        assert_eq!(core.stats().trap_count, 1);
+    }
+
+    #[test]
+    fn delegated_supervisor_interrupt_uses_vectored_stvec_base() {
+        let mut bus = TestBus::new(64);
+        bus.pending_interrupts = InterruptSet::from(InterruptLine::SupervisorExternal);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::User;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mideleg, 1 << 9);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sie, 1 << 9);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x80 | 0b01);
+
+        let cycle = core
+            .step_cycle(&mut bus)
+            .expect("vectored supervisor interrupt should trap through pipeline");
+
+        assert_eq!(cycle.retired_instructions, 0);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Supervisor
+        );
+        assert_eq!(core.hart_state().pc, 0x80 + (9 * 4));
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sepc), 0);
+        assert_eq!(core.stats().trap_count, 1);
+    }
+
+    #[test]
     fn supervisor_wfi_traps_when_tw_is_set() {
         let mut bus = TestBus::new(128);
         bus.store_words(
