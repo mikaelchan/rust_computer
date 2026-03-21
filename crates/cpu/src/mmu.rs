@@ -12,6 +12,8 @@ const SUPERPAGE_OFFSET_MASK: u32 = SUPERPAGE_SIZE - 1;
 const SATP_MODE_SHIFT: u32 = 31;
 const SATP_MODE_SV32: u32 = 1;
 const SATP_PPN_MASK: u32 = (1 << 22) - 1;
+const MSTATUS_SUM: u32 = 1 << 18;
+const MSTATUS_MXR: u32 = 1 << 19;
 const PTE_V: u32 = 1 << 0;
 const PTE_R: u32 = 1 << 1;
 const PTE_W: u32 = 1 << 2;
@@ -54,6 +56,7 @@ struct WalkState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TranslationRequest {
     satp: u32,
+    status: u32,
     privilege: PrivilegeMode,
     virtual_address: u32,
     access: MemoryAccess,
@@ -97,6 +100,7 @@ impl PageWalker {
         let satp = csrs.read(CsrAddress::Satp);
         let request = TranslationRequest {
             satp,
+            status: translation_status(csrs),
             privilege,
             virtual_address,
             access,
@@ -278,6 +282,10 @@ const fn translation_enabled(satp: u32, privilege: PrivilegeMode) -> bool {
     !matches!(privilege, PrivilegeMode::Machine) && (satp >> SATP_MODE_SHIFT) == SATP_MODE_SV32
 }
 
+fn translation_status(csrs: &CsrFile) -> u32 {
+    csrs.read(CsrAddress::Mstatus) & (MSTATUS_SUM | MSTATUS_MXR)
+}
+
 const fn root_pte_address(request: TranslationRequest) -> u32 {
     let root_table = (request.satp & SATP_PPN_MASK) << PAGE_SHIFT;
     root_table.wrapping_add(vpn(request.virtual_address, 1) * 4)
@@ -326,6 +334,9 @@ const fn permissions_allow(request: TranslationRequest, flags: u32) -> bool {
     let readable = (flags & PTE_R) != 0;
     let writable = (flags & PTE_W) != 0;
     let executable = (flags & PTE_X) != 0;
+    let mxr = (request.status & MSTATUS_MXR) != 0;
+    let sum = (request.status & MSTATUS_SUM) != 0;
+    let load_permitted = readable || (mxr && executable);
 
     if !accessed || (matches!(request.access, MemoryAccess::Store) && !dirty) {
         return false;
@@ -333,11 +344,21 @@ const fn permissions_allow(request: TranslationRequest, flags: u32) -> bool {
 
     match request.privilege {
         PrivilegeMode::Machine => true,
-        PrivilegeMode::Supervisor if user_page => false,
+        PrivilegeMode::Supervisor if user_page => {
+            if matches!(request.access, MemoryAccess::Instruction) || !sum {
+                false
+            } else {
+                match request.access {
+                    MemoryAccess::Instruction => executable,
+                    MemoryAccess::Load => load_permitted,
+                    MemoryAccess::Store => writable,
+                }
+            }
+        }
         PrivilegeMode::User if !user_page => false,
         _ => match request.access {
             MemoryAccess::Instruction => executable,
-            MemoryAccess::Load => readable,
+            MemoryAccess::Load => load_permitted,
             MemoryAccess::Store => writable,
         },
     }
@@ -421,6 +442,7 @@ mod tests {
     fn supervisor_superpage_requires_zero_lower_ppn_bits() {
         let request = TranslationRequest {
             satp: 1 << SATP_MODE_SHIFT,
+            status: 0,
             privilege: PrivilegeMode::Supervisor,
             virtual_address: 0x0040_1234,
             access: MemoryAccess::Instruction,
@@ -438,6 +460,7 @@ mod tests {
     fn supervisor_cannot_access_user_page_without_sum_support() {
         let request = TranslationRequest {
             satp: 1 << SATP_MODE_SHIFT,
+            status: 0,
             privilege: PrivilegeMode::Supervisor,
             virtual_address: 0,
             access: MemoryAccess::Load,
@@ -446,6 +469,50 @@ mod tests {
         assert!(!permissions_allow(
             request,
             PTE_V | PTE_R | PTE_U | PTE_A | PTE_D
+        ));
+    }
+
+    #[test]
+    fn supervisor_sum_allows_loads_from_user_pages_but_not_fetches() {
+        let load_request = TranslationRequest {
+            satp: 1 << SATP_MODE_SHIFT,
+            status: MSTATUS_SUM,
+            privilege: PrivilegeMode::Supervisor,
+            virtual_address: 0,
+            access: MemoryAccess::Load,
+        };
+        let fetch_request = TranslationRequest {
+            access: MemoryAccess::Instruction,
+            ..load_request
+        };
+
+        assert!(permissions_allow(
+            load_request,
+            PTE_V | PTE_R | PTE_U | PTE_A | PTE_D
+        ));
+        assert!(!permissions_allow(
+            fetch_request,
+            PTE_V | PTE_X | PTE_U | PTE_A
+        ));
+    }
+
+    #[test]
+    fn mxr_allows_loads_from_execute_only_pages() {
+        let request = TranslationRequest {
+            satp: 1 << SATP_MODE_SHIFT,
+            status: MSTATUS_MXR,
+            privilege: PrivilegeMode::Supervisor,
+            virtual_address: 0,
+            access: MemoryAccess::Load,
+        };
+
+        assert!(permissions_allow(request, PTE_V | PTE_X | PTE_A));
+        assert!(!permissions_allow(
+            TranslationRequest {
+                status: 0,
+                ..request
+            },
+            PTE_V | PTE_X | PTE_A
         ));
     }
 

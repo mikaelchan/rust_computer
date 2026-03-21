@@ -8,9 +8,11 @@ const MSTATUS_MIE: u32 = 1 << 3;
 const MSTATUS_SPIE: u32 = 1 << 5;
 const MSTATUS_MPIE: u32 = 1 << 7;
 const MSTATUS_SPP: u32 = 1 << 8;
+const MSTATUS_SUM: u32 = 1 << 18;
+const MSTATUS_MXR: u32 = 1 << 19;
 const MSTATUS_MPP_SHIFT: u32 = 11;
 const MSTATUS_MPP_MASK: u32 = 0b11 << MSTATUS_MPP_SHIFT;
-const SSTATUS_MASK: u32 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP;
+const SSTATUS_MASK: u32 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM | MSTATUS_MXR;
 const MIE_SSIE: u32 = 1 << 1;
 const MIE_MSIE: u32 = 1 << 3;
 const MIE_STIE: u32 = 1 << 5;
@@ -600,6 +602,21 @@ mod tests {
         assert_eq!(
             csrs.read(CsrAddress::Mstatus) & !super::SSTATUS_MASK,
             !super::SSTATUS_MASK
+        );
+    }
+
+    #[test]
+    fn sstatus_exposes_sum_and_mxr_bits() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Sstatus, super::MSTATUS_SUM | super::MSTATUS_MXR);
+
+        assert_eq!(
+            csrs.read(CsrAddress::Sstatus),
+            super::MSTATUS_SUM | super::MSTATUS_MXR
+        );
+        assert_eq!(
+            csrs.read(CsrAddress::Mstatus) & (super::MSTATUS_SUM | super::MSTATUS_MXR),
+            super::MSTATUS_SUM | super::MSTATUS_MXR
         );
     }
 }
