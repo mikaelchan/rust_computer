@@ -714,6 +714,116 @@ mod tests {
     }
 
     #[test]
+    fn machine_mode_mprv_supervisor_requires_sum_for_user_pages() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Satp, sv32_satp(0x2000));
+        csrs.write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x1000,
+            PTE_R | PTE_U | PTE_A | PTE_D,
+        );
+
+        let translated = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Machine,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("mprv supervisor load without sum should resolve to a page fault");
+
+        assert_eq!(
+            translated,
+            TranslationResult::PageFault(Trap::Exception(Exception::LoadPageFault {
+                addr: 0x4123
+            }))
+        );
+    }
+
+    #[test]
+    fn machine_mode_mprv_supervisor_honors_mxr_for_execute_only_pages() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Satp, sv32_satp(0x2000));
+        csrs.write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+        install_sv32_mapping(&mut bus, 0x2000, 0x3000, 0x4000, 0x1000, PTE_X | PTE_A);
+
+        let without_mxr = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Machine,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("mprv supervisor load without mxr should resolve to a page fault");
+
+        csrs.write(
+            CsrAddress::Mstatus,
+            MSTATUS_MPRV | MSTATUS_MXR | (1 << MSTATUS_MPP_SHIFT),
+        );
+        let with_mxr = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Machine,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("mprv supervisor load with mxr should succeed");
+
+        assert_eq!(
+            without_mxr,
+            TranslationResult::PageFault(Trap::Exception(Exception::LoadPageFault {
+                addr: 0x4123
+            }))
+        );
+        assert_eq!(with_mxr, TranslationResult::PhysicalAddress(0x1123));
+    }
+
+    #[test]
+    fn machine_mode_mprv_user_cannot_access_supervisor_pages() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Satp, sv32_satp(0x2000));
+        csrs.write(CsrAddress::Mstatus, MSTATUS_MPRV);
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        let translated = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Machine,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("mprv user load against supervisor page should resolve to a page fault");
+
+        assert_eq!(
+            translated,
+            TranslationResult::PageFault(Trap::Exception(Exception::LoadPageFault {
+                addr: 0x4123
+            }))
+        );
+    }
+
+    #[test]
     fn supervisor_superpage_requires_zero_lower_ppn_bits() {
         let request = TranslationRequest {
             satp: 1 << SATP_MODE_SHIFT,

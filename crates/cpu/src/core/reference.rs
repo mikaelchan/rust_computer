@@ -552,6 +552,120 @@ mod tests {
     }
 
     #[test]
+    fn machine_mprv_supervisor_requires_sum_for_user_page_loads() {
+        let mut bus = TinyBus::default();
+        bus.store_words(
+            0x0000,
+            &[encode_lui(1, 0x8), encode_lw(2, 1, 0), encode_jal(0, 0)],
+        );
+        bus.store_word(0x1000, 9);
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_U | PTE_A | PTE_D,
+        );
+
+        let mut core = ReferenceCore::new(0x0000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Machine;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+        core.hart_state_mut().csrs.write(
+            rvsim_isa::CsrAddress::Mstatus,
+            MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT),
+        );
+
+        core.step_cycle(&mut bus)
+            .expect("setup instruction should execute");
+        let cycle = core
+            .step_cycle(&mut bus)
+            .expect("mprv load without sum should trap");
+
+        assert_eq!(cycle.retired_instructions, 0);
+        assert!(cycle.stalled);
+        assert_eq!(core.hart_state().registers.read(2), 0);
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            13
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            0x8000
+        );
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 4);
+    }
+
+    #[test]
+    fn machine_mprv_supervisor_sum_allows_user_page_loads() {
+        let mut bus = TinyBus::default();
+        bus.store_words(
+            0x0000,
+            &[encode_lui(1, 0x8), encode_lw(2, 1, 0), encode_jal(0, 0)],
+        );
+        bus.store_word(0x1000, 9);
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_U | PTE_A | PTE_D,
+        );
+
+        let mut core = ReferenceCore::new(0x0000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Machine;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+        core.hart_state_mut().csrs.write(
+            rvsim_isa::CsrAddress::Mstatus,
+            MSTATUS_MPRV | MSTATUS_SUM | (1 << MSTATUS_MPP_SHIFT),
+        );
+
+        for _ in 0..4 {
+            core.step_cycle(&mut bus)
+                .expect("mprv sum-enabled machine load should execute");
+        }
+
+        assert_eq!(core.hart_state().registers.read(2), 9);
+    }
+
+    #[test]
+    fn machine_mprv_supervisor_mxr_allows_execute_only_loads() {
+        let mut bus = TinyBus::default();
+        bus.store_words(
+            0x0000,
+            &[encode_lui(1, 0x8), encode_lw(2, 1, 0), encode_jal(0, 0)],
+        );
+        bus.store_word(0x1000, 9);
+        install_sv32_mapping(&mut bus, 0x2000, 0x3000, 0x8000, 0x1000, PTE_X | PTE_A);
+
+        let mut core = ReferenceCore::new(0x0000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Machine;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+        core.hart_state_mut().csrs.write(
+            rvsim_isa::CsrAddress::Mstatus,
+            MSTATUS_MPRV | MSTATUS_MXR | (1 << MSTATUS_MPP_SHIFT),
+        );
+
+        for _ in 0..4 {
+            core.step_cycle(&mut bus)
+                .expect("mprv mxr-enabled machine load should execute");
+        }
+
+        assert_eq!(core.hart_state().registers.read(2), 9);
+    }
+
+    #[test]
     fn executes_fetch_and_data_access_through_sv32_superpage() {
         let mut bus = TinyBus::default();
         bus.store_words(
