@@ -14,8 +14,11 @@ const SATP_MODE_SV32: u32 = 1;
 const SATP_ASID_SHIFT: u32 = 22;
 const SATP_ASID_MASK: u32 = (1 << 9) - 1;
 const SATP_PPN_MASK: u32 = (1 << 22) - 1;
+const MSTATUS_MPRV: u32 = 1 << 17;
 const MSTATUS_SUM: u32 = 1 << 18;
 const MSTATUS_MXR: u32 = 1 << 19;
+const MSTATUS_MPP_SHIFT: u32 = 11;
+const MSTATUS_MPP_MASK: u32 = 0b11 << MSTATUS_MPP_SHIFT;
 const PTE_V: u32 = 1 << 0;
 const PTE_R: u32 = 1 << 1;
 const PTE_W: u32 = 1 << 2;
@@ -133,6 +136,7 @@ impl PageWalker {
         access: MemoryAccess,
     ) -> Result<TranslationResult, BusError> {
         let satp = csrs.read(CsrAddress::Satp);
+        let privilege = effective_privilege(csrs, privilege, access);
         let request = TranslationRequest {
             satp,
             status: translation_status(csrs),
@@ -443,6 +447,25 @@ fn translation_status(csrs: &CsrFile) -> u32 {
     csrs.read(CsrAddress::Mstatus) & (MSTATUS_SUM | MSTATUS_MXR)
 }
 
+fn effective_privilege(
+    csrs: &CsrFile,
+    current_privilege: PrivilegeMode,
+    access: MemoryAccess,
+) -> PrivilegeMode {
+    if matches!(access, MemoryAccess::Instruction)
+        || !matches!(current_privilege, PrivilegeMode::Machine)
+    {
+        return current_privilege;
+    }
+
+    let mstatus = csrs.read(CsrAddress::Mstatus);
+    if (mstatus & MSTATUS_MPRV) == 0 {
+        return current_privilege;
+    }
+
+    privilege_from_bits((mstatus & MSTATUS_MPP_MASK) >> MSTATUS_MPP_SHIFT)
+}
+
 const fn root_pte_address(request: TranslationRequest) -> u32 {
     let root_table = (request.satp & SATP_PPN_MASK) << PAGE_SHIFT;
     root_table.wrapping_add(vpn(request.virtual_address, 1) * 4)
@@ -554,6 +577,14 @@ const fn page_fault(request: TranslationRequest) -> Trap {
     })
 }
 
+const fn privilege_from_bits(bits: u32) -> PrivilegeMode {
+    match bits {
+        0 => PrivilegeMode::User,
+        1 => PrivilegeMode::Supervisor,
+        _ => PrivilegeMode::Machine,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,6 +651,66 @@ mod tests {
             1 << SATP_MODE_SHIFT,
             PrivilegeMode::Machine
         ));
+    }
+
+    #[test]
+    fn machine_mode_mprv_load_uses_supervisor_translation() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Satp, sv32_satp(0x2000));
+        csrs.write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        let translated = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Machine,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("mprv load should translate as supervisor");
+
+        assert_eq!(translated, TranslationResult::PhysicalAddress(0x1123));
+        assert_eq!(bus.load32_count, 2);
+    }
+
+    #[test]
+    fn machine_mode_instruction_fetch_ignores_mprv_translation() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Satp, sv32_satp(0x2000));
+        csrs.write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x1000,
+            PTE_R | PTE_X | PTE_A,
+        );
+
+        let translated = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Machine,
+                0x4123,
+                MemoryAccess::Instruction,
+            )
+            .expect("instruction fetch should stay in machine privilege");
+
+        assert_eq!(translated, TranslationResult::PhysicalAddress(0x4123));
+        assert_eq!(bus.load32_count, 0);
     }
 
     #[test]

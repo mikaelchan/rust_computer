@@ -517,6 +517,41 @@ mod tests {
     }
 
     #[test]
+    fn machine_mprv_load_uses_supervisor_translation() {
+        let mut bus = TinyBus::default();
+        bus.store_words(
+            0x0000,
+            &[encode_lui(1, 0x8), encode_lw(2, 1, 0), encode_jal(0, 0)],
+        );
+        bus.store_word(0x1000, 9);
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        let mut core = ReferenceCore::new(0x0000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Machine;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+        core.hart_state_mut().csrs.write(
+            rvsim_isa::CsrAddress::Mstatus,
+            MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT),
+        );
+
+        for _ in 0..4 {
+            core.step_cycle(&mut bus)
+                .expect("mprv-enabled machine load should execute");
+        }
+
+        assert_eq!(core.hart_state().registers.read(2), 9);
+    }
+
+    #[test]
     fn satp_write_switches_address_space() {
         let mut bus = TinyBus::default();
         bus.store_words(
@@ -1570,8 +1605,10 @@ mod tests {
     const PTE_G: u32 = 1 << 5;
     const PTE_A: u32 = 1 << 6;
     const PTE_D: u32 = 1 << 7;
+    const MSTATUS_MPRV: u32 = 1 << 17;
     const MSTATUS_SUM: u32 = 1 << 18;
     const MSTATUS_MXR: u32 = 1 << 19;
+    const MSTATUS_MPP_SHIFT: u32 = 11;
 
     fn encode_lui(rd: u8, upper_20: u32) -> u32 {
         (upper_20 << 12) | ((rd as u32) << 7) | 0b0110111
