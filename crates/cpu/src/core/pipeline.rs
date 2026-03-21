@@ -1721,6 +1721,51 @@ mod tests {
     }
 
     #[test]
+    fn csr_write_to_mip_raises_machine_software_interrupt() {
+        let mut bus = TestBus::new(128);
+        bus.load_program(&[
+            encode_csrrwi(0, rvsim_isa::CsrAddress::Mip as u16, 8),
+            encode_addi(1, 0, 1),
+            encode_jal(0, 0),
+            0,
+            0,
+            0,
+            0,
+            0,
+            encode_addi(10, 0, 9),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        for _ in 0..12 {
+            core.step_cycle(&mut bus)
+                .expect("mip-raised machine software interrupt should execute through pipeline");
+            if core.hart_state().registers.read(10) == 9 {
+                break;
+            }
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().registers.read(10), 9);
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 4);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            (1_u32 << 31) | 3
+        );
+        assert_eq!(core.stats().trap_count, 1);
+    }
+
+    #[test]
     fn delegated_supervisor_interrupt_uses_vectored_stvec_base() {
         let mut bus = TestBus::new(64);
         bus.pending_interrupts = InterruptSet::from(InterruptLine::SupervisorExternal);
@@ -1748,6 +1793,59 @@ mod tests {
         );
         assert_eq!(core.hart_state().pc, 0x80 + (9 * 4));
         assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sepc), 0);
+        assert_eq!(core.stats().trap_count, 1);
+    }
+
+    #[test]
+    fn csr_write_to_sip_raises_delegated_supervisor_software_interrupt() {
+        let mut bus = TestBus::new(128);
+        bus.load_program(&[
+            encode_csrrwi(0, rvsim_isa::CsrAddress::Sip as u16, 2),
+            encode_addi(1, 0, 1),
+            encode_jal(0, 0),
+            0,
+            0,
+            0,
+            0,
+            0,
+            encode_addi(10, 0, 6),
+            encode_jal(0, 0),
+        ]);
+
+        let mut core = PipelineCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mideleg, 1 << 1);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sie, 1 << 1);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sstatus, 1 << 1);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x20);
+
+        for _ in 0..12 {
+            core.step_cycle(&mut bus)
+                .expect("sip-raised supervisor software interrupt should execute through pipeline");
+            if core.hart_state().registers.read(10) == 6 {
+                break;
+            }
+        }
+
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(core.hart_state().registers.read(10), 6);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Supervisor
+        );
+        assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sepc), 4);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Scause),
+            (1_u32 << 31) | 1
+        );
         assert_eq!(core.stats().trap_count, 1);
     }
 

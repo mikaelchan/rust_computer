@@ -1828,6 +1828,45 @@ mod tests {
     }
 
     #[test]
+    fn csr_write_to_mip_raises_machine_software_interrupt() {
+        let mut bus = TinyBus::default();
+        bus.load_program(&[
+            encode_csrrwi(0, rvsim_isa::CsrAddress::Mip as u16, 8),
+            encode_addi(1, 0, 1),
+            encode_jal(0, 0),
+        ]);
+        bus.store_words(0x0020, &[encode_addi(10, 0, 9), encode_jal(0, 0)]);
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mstatus, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mie, 1 << 3);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        let first = core
+            .step_cycle(&mut bus)
+            .expect("mip write should retire before interrupt is observed");
+        assert_eq!(first.retired_instructions, 1);
+        assert_eq!(core.hart_state().pc, 4);
+
+        let second = core
+            .step_cycle(&mut bus)
+            .expect("csr-raised machine software interrupt should trap");
+        assert_eq!(second.retired_instructions, 0);
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            (1_u32 << 31) | 3
+        );
+    }
+
+    #[test]
     fn delegated_supervisor_interrupt_uses_vectored_stvec_base() {
         let mut bus = InterruptBus {
             pending_interrupts: InterruptSet::from(InterruptLine::SupervisorExternal),
@@ -1855,6 +1894,53 @@ mod tests {
         );
         assert_eq!(core.hart_state().pc, 0x80 + (9 * 4));
         assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Sepc), 0);
+    }
+
+    #[test]
+    fn csr_write_to_sip_raises_delegated_supervisor_software_interrupt() {
+        let mut bus = TinyBus::default();
+        bus.load_program(&[
+            encode_csrrwi(0, rvsim_isa::CsrAddress::Sip as u16, 2),
+            encode_addi(1, 0, 1),
+            encode_jal(0, 0),
+        ]);
+        bus.store_words(0x0020, &[encode_addi(10, 0, 6), encode_jal(0, 0)]);
+
+        let mut core = ReferenceCore::new(0);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Supervisor;
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mideleg, 1 << 1);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sie, 1 << 1);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Sstatus, 1 << 1);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Stvec, 0x20);
+
+        let first = core
+            .step_cycle(&mut bus)
+            .expect("sip write should retire before delegated interrupt is observed");
+        assert_eq!(first.retired_instructions, 1);
+        assert_eq!(core.hart_state().pc, 4);
+
+        let second = core
+            .step_cycle(&mut bus)
+            .expect("csr-raised supervisor software interrupt should trap");
+        assert_eq!(second.retired_instructions, 0);
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Supervisor
+        );
+        assert_eq!(core.hart_state().pc, 0x20);
+        assert_eq!(core.hart_state().registers.read(1), 0);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Scause),
+            (1_u32 << 31) | 1
+        );
     }
 
     #[test]

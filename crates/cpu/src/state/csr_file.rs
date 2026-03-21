@@ -31,6 +31,8 @@ const MIP_MEIP: u32 = 1 << 11;
 const MIP_MTIP: u32 = 1 << 7;
 const SIP_MASK: u32 = MIP_SSIP | MIP_STIP | MIP_SEIP;
 const MANAGED_INTERRUPT_MASK: u32 = MIP_SSIP | MIP_MSIP | MIP_STIP | MIP_MTIP | MIP_SEIP | MIP_MEIP;
+const MIP_WRITABLE_MASK: u32 = MIP_SSIP | MIP_MSIP;
+const SIP_WRITABLE_MASK: u32 = MIP_SSIP;
 const MIDELEG_MASK: u32 = MIP_SSIP | MIP_STIP | MIP_SEIP;
 const COUNTEREN_CY: u32 = 1 << 0;
 const COUNTEREN_TM: u32 = 1 << 1;
@@ -78,6 +80,8 @@ pub struct SupervisorCsrs {
 pub struct CsrFile {
     machine: MachineCsrs,
     supervisor: SupervisorCsrs,
+    software_pending: u32,
+    external_pending: u32,
 }
 
 impl CsrFile {
@@ -148,12 +152,18 @@ impl CsrFile {
             CsrAddress::Scause => self.supervisor.scause = value,
             CsrAddress::Stval => self.supervisor.stval = value,
             CsrAddress::Sip => {
-                self.machine.mip = (self.machine.mip & !SIP_MASK) | (value & SIP_MASK);
+                self.software_pending =
+                    (self.software_pending & !SIP_WRITABLE_MASK) | (value & SIP_WRITABLE_MASK);
+                self.refresh_mip();
             }
             CsrAddress::Mepc => self.machine.mepc = value,
             CsrAddress::Mcause => self.machine.mcause = value,
             CsrAddress::Mtval => self.machine.mtval = value,
-            CsrAddress::Mip => self.machine.mip = value,
+            CsrAddress::Mip => {
+                self.software_pending =
+                    (self.software_pending & !MIP_WRITABLE_MASK) | (value & MIP_WRITABLE_MASK);
+                self.refresh_mip();
+            }
         }
     }
 
@@ -176,31 +186,33 @@ impl CsrFile {
     }
 
     pub fn sync_interrupts(&mut self, interrupts: InterruptSet) {
-        self.machine.mip &= !MANAGED_INTERRUPT_MASK;
+        self.external_pending = 0;
 
         if interrupts.contains(InterruptLine::SupervisorSoftware) {
-            self.machine.mip |= MIP_SSIP;
+            self.external_pending |= MIP_SSIP;
         }
 
         if interrupts.contains(InterruptLine::MachineExternal) {
-            self.machine.mip |= MIP_MEIP;
+            self.external_pending |= MIP_MEIP;
         }
 
         if interrupts.contains(InterruptLine::MachineSoftware) {
-            self.machine.mip |= MIP_MSIP;
+            self.external_pending |= MIP_MSIP;
         }
 
         if interrupts.contains(InterruptLine::SupervisorTimer) {
-            self.machine.mip |= MIP_STIP;
+            self.external_pending |= MIP_STIP;
         }
 
         if interrupts.contains(InterruptLine::MachineTimer) {
-            self.machine.mip |= MIP_MTIP;
+            self.external_pending |= MIP_MTIP;
         }
 
         if interrupts.contains(InterruptLine::SupervisorExternal) {
-            self.machine.mip |= MIP_SEIP;
+            self.external_pending |= MIP_SEIP;
         }
+
+        self.refresh_mip();
     }
 
     #[must_use]
@@ -266,6 +278,12 @@ impl CsrFile {
     #[must_use]
     pub fn tw_enabled(&self) -> bool {
         (self.machine.mstatus & MSTATUS_TW) != 0
+    }
+
+    fn refresh_mip(&mut self) {
+        self.machine.mip = (self.machine.mip & !MANAGED_INTERRUPT_MASK)
+            | (self.software_pending & MIP_WRITABLE_MASK)
+            | (self.external_pending & MANAGED_INTERRUPT_MASK);
     }
 
     fn delegates_trap_to_supervisor(&self, trap: Trap, current_privilege: PrivilegeMode) -> bool {
@@ -559,6 +577,46 @@ mod tests {
     }
 
     #[test]
+    fn software_pending_bits_survive_sync_without_bus_sources() {
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Mip, super::MIP_MSIP | super::MIP_SSIP);
+        csrs.sync_interrupts(InterruptSet::empty());
+
+        assert_eq!(
+            csrs.read(CsrAddress::Mip) & (super::MIP_MSIP | super::MIP_SSIP),
+            super::MIP_MSIP | super::MIP_SSIP
+        );
+    }
+
+    #[test]
+    fn mip_write_only_controls_modeled_software_pending_bits() {
+        let mut csrs = CsrFile::default();
+        csrs.sync_interrupts(InterruptSet::from(InterruptLine::MachineTimer));
+        csrs.write(CsrAddress::Mip, u32::MAX);
+
+        assert_eq!(
+            csrs.read(CsrAddress::Mip),
+            super::MIP_MSIP | super::MIP_SSIP | super::MIP_MTIP
+        );
+    }
+
+    #[test]
+    fn sip_write_only_controls_ssip_and_preserves_device_pending_bits() {
+        let mut csrs = CsrFile::default();
+        csrs.sync_interrupts(
+            InterruptSet::from(InterruptLine::SupervisorTimer)
+                .union(InterruptSet::from(InterruptLine::SupervisorExternal)),
+        );
+        csrs.write(CsrAddress::Sip, u32::MAX);
+
+        assert_eq!(
+            csrs.read(CsrAddress::Sip),
+            super::MIP_SSIP | super::MIP_STIP | super::MIP_SEIP
+        );
+        assert_eq!(csrs.read(CsrAddress::Mip) & super::MIP_MSIP, 0);
+    }
+
+    #[test]
     fn delegated_supervisor_interrupt_is_pending_in_user_mode() {
         let mut csrs = CsrFile::default();
         csrs.write(CsrAddress::Mideleg, 1 << 9);
@@ -596,6 +654,18 @@ mod tests {
         assert_eq!(
             csrs.pending_interrupt(PrivilegeMode::Supervisor),
             Some(Interrupt::SupervisorSoftware)
+        );
+    }
+
+    #[test]
+    fn clearing_software_pending_does_not_clear_bus_driven_interrupt_line() {
+        let mut csrs = CsrFile::default();
+        csrs.sync_interrupts(InterruptSet::from(InterruptLine::MachineSoftware));
+        csrs.write(CsrAddress::Mip, 0);
+
+        assert_eq!(
+            csrs.read(CsrAddress::Mip) & super::MIP_MSIP,
+            super::MIP_MSIP
         );
     }
 
