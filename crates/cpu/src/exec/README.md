@@ -26,3 +26,10 @@ This module contains instruction semantics shared by both CPU cores.
 ## Practical Rule
 
 - When adding a new instruction, prefer extending this module first so both core models inherit the same architectural meaning.
+
+## Related Reading
+
+- [cpu crate](/Users/michael/Workspace/rust_computer/crates/cpu/src/README.md)
+- [isa crate](/Users/michael/Workspace/rust_computer/crates/isa/src/README.md)
+- [architectural state](/Users/michael/Workspace/rust_computer/crates/cpu/src/state/README.md)
+- [cpu core models](/Users/michael/Workspace/rust_computer/crates/cpu/src/core/README.md)

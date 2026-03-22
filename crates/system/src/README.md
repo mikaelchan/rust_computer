@@ -29,3 +29,12 @@ This crate provides the shared machine-level plumbing around CPUs and devices.
 
 - If a new feature changes how requests move, it probably belongs here.
 - If it changes what an endpoint does once addressed, it probably belongs in `rvsim_devices`.
+
+## Related Reading
+
+- [repository index](/Users/michael/Workspace/rust_computer/README.md)
+- [devices crate](/Users/michael/Workspace/rust_computer/crates/devices/src/README.md)
+- [cpu crate](/Users/michael/Workspace/rust_computer/crates/cpu/src/README.md)
+- [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md)
+- [memory map](/Users/michael/Workspace/rust_computer/docs/memory_map.md)
+- [memory experiments guide](/Users/michael/Workspace/rust_computer/docs/memory_experiments.md)

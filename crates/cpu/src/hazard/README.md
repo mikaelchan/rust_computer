@@ -24,3 +24,10 @@ This module isolates the pipeline hazard rules.
 
 - If a new feature introduces a stall or flush condition, document it here first.
 - Prefer small, explicit hazard predicates over one large opaque controller.
+
+## Related Reading
+
+- [cpu crate](/Users/michael/Workspace/rust_computer/crates/cpu/src/README.md)
+- [cpu core models](/Users/michael/Workspace/rust_computer/crates/cpu/src/core/README.md)
+- [pipeline stages](/Users/michael/Workspace/rust_computer/crates/cpu/src/pipeline/README.md)
+- [CPU plan](/Users/michael/Workspace/rust_computer/docs/cpu_plan.md)

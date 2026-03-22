@@ -26,3 +26,10 @@ This crate defines the ISA-level language understood by the CPU models.
 
 - New architectural features usually start here before they become executable behavior in `rvsim_cpu`.
 - Keep this layer descriptive. Architectural timing belongs elsewhere.
+
+## Related Reading
+
+- [repository index](/Users/michael/Workspace/rust_computer/README.md)
+- [cpu crate](/Users/michael/Workspace/rust_computer/crates/cpu/src/README.md)
+- [execution helpers](/Users/michael/Workspace/rust_computer/crates/cpu/src/exec/README.md)
+- [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md)

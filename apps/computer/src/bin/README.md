@@ -15,3 +15,9 @@ This directory holds extra executable entry points for the `computer` applicatio
 
 - Add a new binary here when the workflow is operationally distinct.
 - Keep shared setup code in `../lib.rs` or sibling modules so binaries stay thin.
+
+## Related Reading
+
+- [computer app](/Users/michael/Workspace/rust_computer/apps/computer/src/README.md)
+- [repository index](/Users/michael/Workspace/rust_computer/README.md)
+- [memory experiments guide](/Users/michael/Workspace/rust_computer/docs/memory_experiments.md)

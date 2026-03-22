@@ -18,3 +18,10 @@ This module defines the branch-prediction surface used by the pipelined core.
 
 - New predictors should implement `BranchPredictor` and keep update semantics explicit.
 - Predictor state should stay local to the predictor implementation rather than leaking into the pipeline core.
+
+## Related Reading
+
+- [pipeline stages](/Users/michael/Workspace/rust_computer/crates/cpu/src/pipeline/README.md)
+- [cpu core models](/Users/michael/Workspace/rust_computer/crates/cpu/src/core/README.md)
+- [CPU plan](/Users/michael/Workspace/rust_computer/docs/cpu_plan.md)
+- [future out-of-order track](/Users/michael/Workspace/rust_computer/docs/future_ooo.md)

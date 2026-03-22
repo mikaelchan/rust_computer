@@ -24,3 +24,11 @@ This crate contains memory-mapped device models that plug into the shared bus.
 
 - New devices should follow the existing MMIO register style and use the shared interrupt lines where possible.
 - If a device needs extra latency but no new behavior, prefer wrapping it in `LatencyAdapter` rather than cloning the device implementation.
+
+## Related Reading
+
+- [repository index](/Users/michael/Workspace/rust_computer/README.md)
+- [system crate](/Users/michael/Workspace/rust_computer/crates/system/src/README.md)
+- [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md)
+- [memory map](/Users/michael/Workspace/rust_computer/docs/memory_map.md)
+- [memory experiments guide](/Users/michael/Workspace/rust_computer/docs/memory_experiments.md)

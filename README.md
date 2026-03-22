@@ -61,6 +61,24 @@ The higher-level design and experiment notes live under [`docs/`](/Users/michael
 - [memory experiments guide](/Users/michael/Workspace/rust_computer/docs/memory_experiments.md)
 - [memory map](/Users/michael/Workspace/rust_computer/docs/memory_map.md)
 
+## Suggested Reading Paths
+
+- CPU architecture work:
+  [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md) ->
+  [cpu crate](/Users/michael/Workspace/rust_computer/crates/cpu/src/README.md) ->
+  [architectural state](/Users/michael/Workspace/rust_computer/crates/cpu/src/state/README.md) ->
+  [cpu core models](/Users/michael/Workspace/rust_computer/crates/cpu/src/core/README.md) ->
+  [pipeline stages](/Users/michael/Workspace/rust_computer/crates/cpu/src/pipeline/README.md)
+- Memory-system work:
+  [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md) ->
+  [system crate](/Users/michael/Workspace/rust_computer/crates/system/src/README.md) ->
+  [devices crate](/Users/michael/Workspace/rust_computer/crates/devices/src/README.md) ->
+  [memory experiments guide](/Users/michael/Workspace/rust_computer/docs/memory_experiments.md)
+- Tooling and runnable experiments:
+  [computer app](/Users/michael/Workspace/rust_computer/apps/computer/src/README.md) ->
+  [app binaries](/Users/michael/Workspace/rust_computer/apps/computer/src/bin/README.md) ->
+  [docs index](/Users/michael/Workspace/rust_computer/docs/README.md)
+
 ## Typical Commands
 
 - `cargo test`

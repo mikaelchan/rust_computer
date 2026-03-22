@@ -20,3 +20,11 @@ This directory contains the runnable application layer for the project.
 - This layer should prefer composition over reimplementation. It wires together `rvsim_cpu`, `rvsim_devices`, and `rvsim_system`.
 - Microbench code lives here because it is experiment-oriented rather than part of the reusable hardware model.
 - Future demos, workload runners, and scripted experiments should enter here before they become their own application packages.
+
+## Related Reading
+
+- [repository index](/Users/michael/Workspace/rust_computer/README.md)
+- [docs index](/Users/michael/Workspace/rust_computer/docs/README.md)
+- [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md)
+- [memory experiments guide](/Users/michael/Workspace/rust_computer/docs/memory_experiments.md)
+- [app binaries](/Users/michael/Workspace/rust_computer/apps/computer/src/bin/README.md)

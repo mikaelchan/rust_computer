@@ -24,3 +24,11 @@ This module owns the top-level CPU implementations.
 
 - Add shared semantics outside this directory when possible.
 - Keep core-local logic focused on scheduling, trapping boundaries, and interaction with the bus/MMU over time.
+
+## Related Reading
+
+- [cpu crate](/Users/michael/Workspace/rust_computer/crates/cpu/src/README.md)
+- [pipeline stages](/Users/michael/Workspace/rust_computer/crates/cpu/src/pipeline/README.md)
+- [hazard logic](/Users/michael/Workspace/rust_computer/crates/cpu/src/hazard/README.md)
+- [architectural state](/Users/michael/Workspace/rust_computer/crates/cpu/src/state/README.md)
+- [CPU plan](/Users/michael/Workspace/rust_computer/docs/cpu_plan.md)

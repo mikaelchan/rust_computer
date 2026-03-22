@@ -24,3 +24,10 @@ This module owns the CPU state that exists at architectural boundaries.
 
 - Add new privileged features here before layering them into fetch, execute, or pipeline timing.
 - Prefer precise unit tests in `csr_file.rs` whenever trap-state semantics change.
+
+## Related Reading
+
+- [cpu crate](/Users/michael/Workspace/rust_computer/crates/cpu/src/README.md)
+- [execution helpers](/Users/michael/Workspace/rust_computer/crates/cpu/src/exec/README.md)
+- [system crate](/Users/michael/Workspace/rust_computer/crates/system/src/README.md)
+- [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md)

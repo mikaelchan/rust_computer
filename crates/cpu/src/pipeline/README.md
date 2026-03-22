@@ -24,3 +24,11 @@ This module contains the building blocks of the in-order pipeline.
 - The stage helpers are intentionally narrow. They make stage-local behavior testable without collapsing the whole pipeline into one function.
 - Pipeline latches are treated as first-class state, which is important for precise exceptions, forwarding, and replay.
 - Branch prediction and hazard logic live outside this directory so the stages stay focused on per-stage work rather than global policy.
+
+## Related Reading
+
+- [cpu core models](/Users/michael/Workspace/rust_computer/crates/cpu/src/core/README.md)
+- [hazard logic](/Users/michael/Workspace/rust_computer/crates/cpu/src/hazard/README.md)
+- [branch prediction](/Users/michael/Workspace/rust_computer/crates/cpu/src/predictor/README.md)
+- [architectural state](/Users/michael/Workspace/rust_computer/crates/cpu/src/state/README.md)
+- [CPU plan](/Users/michael/Workspace/rust_computer/docs/cpu_plan.md)
