@@ -77,7 +77,7 @@ The current baseline already has:
   The CPU now performs `Sv32` instruction and data address translation from `satp`, walks page tables across cycles, and raises instruction/load/store page faults through the existing trap machinery in both CPU models.
 
 - [ ] Extend virtual memory beyond the first slice.
-  TLBs, selective `sfence.vma`, hardware-managed A/D bits, the first `SUM`/`MXR` supervisor permission controls, `satp`-scoped TLB namespaces, basic global (`PTE.G`) mappings, and end-to-end superpage coverage are now in place. Broader ASID experiments and wider page-table studies remain future work.
+  TLBs, selective `sfence.vma`, hardware-managed A/D bits, the first `SUM`/`MXR` supervisor permission controls, `satp`-scoped TLB namespaces, basic global (`PTE.G`) mappings, end-to-end superpage coverage, and a user-facing translation-caching microbenchmark for cold/warm loads, ASID switches, global mappings, and `sfence.vma` reloads are now in place. Broader ASID experiments and wider page-table studies remain future work.
 
 - [ ] Keep the out-of-order path separate until the memory system is ready.
   OOO remains a future milestone, but it should not move ahead of the remaining cache/bus foundations.
@@ -85,7 +85,7 @@ The current baseline already has:
 ## Tooling And Validation
 
 - [x] Add focused microbenchmarks for cache and memory behavior.
-  The `memory_microbench` binary now reports conflict-miss pressure, line refill cost, write-back pressure, and interrupt latency under load, with matching regression tests for the qualitative behavior.
+  The `memory_microbench` binary now reports conflict-miss pressure, line refill cost, write-back pressure, interrupt latency under load, and translation-caching behavior across ASID switches and `sfence.vma`, with matching regression tests for the qualitative behavior.
 
 - [x] Add a small architecture test program suite.
   Versioned RV32 program images now live under `crates/cpu/tests/programs`, and integration tests run them against both the reference and pipeline cores.

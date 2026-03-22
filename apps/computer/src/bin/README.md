@@ -4,7 +4,7 @@ This directory holds extra executable entry points for the `computer` applicatio
 
 ## Current Binary
 
-- `memory_microbench.rs`: runs the memory and interrupt microbench suite and prints the collected reports.
+- `memory_microbench.rs`: runs the memory, translation, and interrupt microbench suite and prints the collected reports.
 
 ## Why This Exists
 

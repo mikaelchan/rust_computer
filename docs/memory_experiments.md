@@ -13,6 +13,7 @@ The current baseline is:
 - DRAM timing with row-miss, row-hit, and sequential-burst behavior
 - a single shared lower bus with round-robin arbitration for autonomous masters such as DMA
 - explicit cache traffic counters for refills, dirty evictions, write-backs, and bypassed accesses
+- a translation microbenchmark path for TLB warm hits, ASID namespace switches, global mappings, and `sfence.vma` reload cost
 
 Two built-in entry points are useful for memory work:
 
@@ -145,6 +146,39 @@ Interpretation:
 - memory pressure delays when the interrupt can be observed precisely
 - the pipeline incurs extra control overhead even in the idle case
 
+### Translation Caching And ASID Switching
+
+Use this when you want to study how much page-table walking still leaks through after the current TLB, namespace, and fence logic.
+
+Recommended shape:
+
+- keep instruction fetch physical so the benchmark isolates data translation rather than front-end fetch effects
+- preload two address spaces that map the same virtual address differently
+- compare a cold translated load, a warm translated load, an ASID switch, a return to a previously cached ASID, and a full `sfence.vma` reload
+- run a second variant with `PTE.G` set so the same mapping can be reused across address spaces
+
+The built-in benchmark uses machine-mode `MPRV` loads so instruction fetch remains simple while the data path still exercises `Sv32`.
+
+Expected behavior:
+
+- a cold translated load should cost more than a warm translated load
+- switching to a different non-global ASID should cost more than returning to a previously cached ASID
+- switching across a global mapping should be closer to the warm case than to the non-global ASID-switch case
+- a full `sfence.vma` should force the next translated load back onto the page-walk path
+
+Current sample output:
+
+```text
+translation_caching: reference(cold=14 warm=6 asid_switch=15 asid_return=7 global_switch=7 sfence_reload=15) pipeline(cold=18 warm=7 asid_switch=19 asid_return=10 global_switch=11 sfence_reload=18)
+```
+
+Interpretation:
+
+- the warm path shows the current TLB is serving repeated loads without rewalking
+- returning to the original ASID stays cheaper than first entering a new non-global namespace
+- global mappings remain reusable across ASIDs
+- `sfence.vma` restores the page-walk cost on the next translated access
+
 ## Cache Policy Recommendations
 
 Use these policy combinations depending on what you want to learn:
@@ -178,7 +212,7 @@ A few important caveats matter for experiments:
 A good default workflow for new memory experiments is:
 
 1. Run `cargo run -p rvsim-computer --bin memory_microbench` and record the baseline output.
-2. Change one variable at a time in [microbench.rs](../apps/computer/src/microbench.rs): line size, associativity, write policy, store-allocation policy, or DRAM timing.
+2. Change one variable at a time in [microbench.rs](../apps/computer/src/microbench.rs): line size, associativity, write policy, store-allocation policy, DRAM timing, or translation scenario setup.
 3. Re-run the benchmark and compare both stall cycles and cache traffic counters.
 4. If the change is intended to preserve behavior, run `cargo test` and `cargo test -p rvsim-cpu --test program_suite`.
 5. If the change touches DMA-visible memory, verify that the region is either uncached or paired with explicit cache maintenance, and document that assumption.

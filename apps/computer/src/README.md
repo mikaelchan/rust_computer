@@ -12,7 +12,7 @@ This directory contains the runnable application layer for the project.
 
 - `lib.rs`: library surface for the application package.
 - `main.rs`: the default `computer` binary entry point.
-- `microbench.rs`: memory-system and interrupt-latency microbench harnesses.
+- `microbench.rs`: memory-system, translation, and interrupt-latency microbench harnesses.
 - `bin/`: extra standalone binaries.
 
 ## Design Notes
@@ -54,6 +54,7 @@ This makes `main.rs` closer to a system integration notebook than to a minimal C
 - Each benchmark builds only the machine pieces needed for one phenomenon.
 - Reports are typed structs rather than ad hoc strings, so tests can validate them and binaries can print them.
 - The benchmark helpers measure stall cycles by repeatedly advancing the underlying bus or machine until the target action completes.
+- The current suite covers cache conflicts, line refills, dirty write-back pressure, interrupt latency, and translation-caching behavior across ASID switches and `sfence.vma`.
 
 This keeps the measurement logic explicit and reusable.
 

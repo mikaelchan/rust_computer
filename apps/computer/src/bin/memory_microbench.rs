@@ -37,6 +37,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.interrupt_latency.pipeline.idle_cycles,
         report.interrupt_latency.pipeline.loaded_cycles
     );
+    println!(
+        "translation_caching: reference(cold={} warm={} asid_switch={} asid_return={} global_switch={} sfence_reload={}) pipeline(cold={} warm={} asid_switch={} asid_return={} global_switch={} sfence_reload={})",
+        report.translation_caching.reference.cold_cycles,
+        report.translation_caching.reference.warm_cycles,
+        report.translation_caching.reference.switched_asid_cycles,
+        report.translation_caching.reference.returned_asid_cycles,
+        report
+            .translation_caching
+            .reference
+            .global_switched_asid_cycles,
+        report.translation_caching.reference.sfence_reload_cycles,
+        report.translation_caching.pipeline.cold_cycles,
+        report.translation_caching.pipeline.warm_cycles,
+        report.translation_caching.pipeline.switched_asid_cycles,
+        report.translation_caching.pipeline.returned_asid_cycles,
+        report
+            .translation_caching
+            .pipeline
+            .global_switched_asid_cycles,
+        report.translation_caching.pipeline.sfence_reload_cycles
+    );
 
     Ok(())
 }
