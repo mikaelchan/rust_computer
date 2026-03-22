@@ -86,5 +86,6 @@ If one change starts touching all of those at once, it is usually a sign that th
 - [architecture overview](../../../docs/architecture.md)
 - [CPU plan](../../../docs/cpu_plan.md)
 - [future out-of-order track](../../../docs/future_ooo.md)
+- [cpu integration tests](../../../crates/cpu/tests/README.md)
 - [cpu core models](../../../crates/cpu/src/core/README.md)
 - [architectural state](../../../crates/cpu/src/state/README.md)

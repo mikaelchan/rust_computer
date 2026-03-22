@@ -34,6 +34,7 @@ The integration test harness parses these files directly so the same program ima
 
 ## Related Reading
 
+- [cpu integration tests](../README.md)
 - [cpu crate](../../src/README.md)
 - [cpu core models](../../src/core/README.md)
 - [computer app](../../../../apps/computer/src/README.md)

@@ -35,6 +35,7 @@ Directory-backed modules now carry their own `README.md` files:
 - [computer app](./apps/computer/src/README.md)
 - [app binaries](./apps/computer/src/bin/README.md)
 - [cpu crate](./crates/cpu/src/README.md)
+- [cpu integration tests](./crates/cpu/tests/README.md)
 - [cpu core models](./crates/cpu/src/core/README.md)
 - [execution helpers](./crates/cpu/src/exec/README.md)
 - [hazard logic](./crates/cpu/src/hazard/README.md)
