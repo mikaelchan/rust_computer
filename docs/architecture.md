@@ -9,3 +9,33 @@ This project starts with a single-core, cycle-driven von Neumann machine.
 - `rvsim-computer`: a tiny executable that wires the pieces together.
 
 The current milestone targets `RV32I + machine mode + a first supervisor trap slice + delegated supervisor interrupts + a first Sv32 virtual-memory slice`. The CPU now models supervisor trap CSRs, `sret`, synchronous exception delegation through `medeleg`, privilege-aware CSR access checks, privilege-aware interrupt arbitration through `mideleg`, `mie/mip`, `sie/sip`, and `mstatus`/`sstatus`, plus `Sv32` instruction/data translation driven by `satp`. Both CPU models now walk page tables across cycles before fetches, loads, and stores, and they raise instruction/load/store page faults through the existing trap machinery when translation or permissions fail. The unified bus and memory-map layer now expose both machine and supervisor interrupt lines, and the device set includes a simple supervisor software interrupt source so delegated S-mode interrupt flows can be exercised end to end. The first timing model is now in place as a single shared bus with fixed per-device wait states; loads, stores, instruction fetches, and now page-table walks retry until the bus becomes ready again. The backing memory map now also exposes that timing as explicit transaction and burst lifecycles with `Accepted`, `InFlight`, and `Ready` phases, and those lower-fabric APIs can keep multiple requests in flight concurrently while the CPU-facing compatibility `Bus` path still presents retry-until-ready semantics. That is the first step toward a more protocol-like bus model without breaking the existing CPU-facing `Bus` trait. A unified cache or split L1 instruction/data cache can now wrap that bus with configurable line sizes, set associativity, round-robin or LRU replacement, and explicit write policies (`write-through` or `write-back`) plus store allocation policies. Cache misses now refill whole lines through explicit lower-bus burst requests, dirty write-back evictions drain modified lines through matching write bursts, and the current `computer` example now composes split L1 caches over a unified L2 that can itself serve burst refills upward. Cache wrappers also expose software-managed `write_back_range` and `invalidate_range` maintenance hooks, and those hooks recurse through every cache level above the shared arbiter so DMA experiments can use cached buffers without assuming hardware coherence. Below the cache hierarchy, a round-robin arbiter can now submit autonomous master loads and stores as explicit lower-bus transactions or bursts, can keep a configurable number of requests in flight per master, and still delivers responses back to each master in submission order. The DMA engine now uses bounded read-ahead burst queues so memory copies can overlap several lower-bus requests instead of alternating strictly one request at a time, and the device set now includes a RAM-backed block device with MMIO command registers plus a one-block staging window for storage-style experiments. Cache statistics now expose traffic-oriented counters such as refill words, write-back words, dirty evictions, and bypassed accesses so each cache level's lower-level pressure is observable, while the DMA path itself remains intentionally non-coherent so software-visible maintenance effects stay explicit in experiments. Architectural regressions also now have versioned RV32 program images under `crates/cpu/tests/programs`, so both CPU models can be driven from the same in-tree boot/program artifacts, and the `memory_microbench` binary provides a repeatable way to inspect conflict misses, refill cost, write-back traffic, and interrupt latency under memory pressure. The current MMU slice intentionally stops short of TLBs, `sfence.vma`, and more complete privileged memory controls, so those remain natural next steps. See `docs/memory_experiments.md` for the recommended experiment workflow and interpretation notes. The directory layout already leaves space for richer privileged state, full virtual memory, more devices, deeper cache hierarchies, and a later out-of-order core.
+
+## Code Entry Points
+
+- [cpu crate](../crates/cpu/src/README.md)
+  For the architectural and microarchitectural CPU model.
+- [system crate](../crates/system/src/README.md)
+  For bus, cache, arbitration, and machine-plumbing details.
+- [devices crate](../crates/devices/src/README.md)
+  For MMIO peripherals, DMA, DRAM, and interrupt sources.
+- [isa crate](../crates/isa/src/README.md)
+  For decode, trap vocabulary, and CSR-address metadata.
+- [computer app](../apps/computer/src/README.md)
+  For the runnable example machine and experiment harnesses.
+
+## Suggested Reading Path
+
+1. Read this file for the high-level machine shape.
+2. Read [memory_map.md](./memory_map.md) for concrete physical layout.
+3. Read [../crates/system/src/README.md](../crates/system/src/README.md) and [../crates/devices/src/README.md](../crates/devices/src/README.md) for transport and peripherals.
+4. Read [../crates/cpu/src/README.md](../crates/cpu/src/README.md) for execution and privilege behavior.
+5. Read [memory_experiments.md](./memory_experiments.md) for experiment workflows.
+
+## How To Validate
+
+- `cargo test`
+  Runs the full workspace regression suite against the architecture as currently modeled.
+- `cargo run -p rvsim-computer`
+  Runs the integrated example machine.
+- `cargo run -p rvsim-computer --bin memory_microbench`
+  Runs the focused memory and interrupt experiment suite.

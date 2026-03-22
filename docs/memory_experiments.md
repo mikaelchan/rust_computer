@@ -178,7 +178,27 @@ A few important caveats matter for experiments:
 A good default workflow for new memory experiments is:
 
 1. Run `cargo run -p rvsim-computer --bin memory_microbench` and record the baseline output.
-2. Change one variable at a time in [microbench.rs](/Users/michael/Workspace/rust_computer/apps/computer/src/microbench.rs): line size, associativity, write policy, store-allocation policy, or DRAM timing.
+2. Change one variable at a time in [microbench.rs](../apps/computer/src/microbench.rs): line size, associativity, write policy, store-allocation policy, or DRAM timing.
 3. Re-run the benchmark and compare both stall cycles and cache traffic counters.
 4. If the change is intended to preserve behavior, run `cargo test` and `cargo test -p rvsim-cpu --test program_suite`.
 5. If the change touches DMA-visible memory, verify that the region is either uncached or paired with explicit cache maintenance, and document that assumption.
+
+## Related Reading
+
+- [architecture.md](./architecture.md)
+- [memory_map.md](./memory_map.md)
+- [../crates/system/src/README.md](../crates/system/src/README.md)
+- [../crates/devices/src/README.md](../crates/devices/src/README.md)
+- [../apps/computer/src/README.md](../apps/computer/src/README.md)
+- [../apps/computer/src/bin/README.md](../apps/computer/src/bin/README.md)
+
+## Validation Entry Points
+
+- `cargo run -p rvsim-computer --bin memory_microbench`
+  Primary entry point for the experiments described here.
+- `cargo test -p rvsim-system`
+  Useful when changing cache, burst, arbitration, or memory-map behavior.
+- `cargo test -p rvsim-devices`
+  Useful when changing DRAM, DMA, or interrupt-capable devices.
+- `cargo test -p rvsim-cpu --test program_suite`
+  Useful when a memory-system change can alter guest-visible CPU behavior.
