@@ -65,6 +65,13 @@ That separation keeps devices small and composable. A peripheral should describe
 - Use route bits and shared interrupt lines instead of device-specific CPU hooks.
 - If the device originates memory traffic, implement `BusMaster` rather than bypassing the fabric.
 
+## How To Validate
+
+- `cargo test -p rvsim-devices`
+  Runs device-local regressions for timers, interrupt routing, DMA, DRAM, and storage.
+- `cargo test`
+  Recommended when a device change also affects CPU-visible interrupt or memory behavior.
+
 ## Extension Notes
 
 - New devices should follow the existing MMIO register style and use the shared interrupt lines where possible.

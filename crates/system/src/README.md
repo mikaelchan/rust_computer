@@ -78,6 +78,13 @@ This matters because DMA is modeled as a real competing master, not as a magical
 - Add new shared-master scheduling rules in `arbiter.rs`.
 - Keep `machine.rs` thin. It should orchestrate components, not absorb transport policy.
 
+## How To Validate
+
+- `cargo test -p rvsim-system`
+  Runs bus, cache, arbitration, and memory-map regressions.
+- `cargo run -p rvsim-computer --bin memory_microbench`
+  Good for checking whether memory-system behavior still looks qualitatively correct from the application side.
+
 ## Extension Notes
 
 - If a new feature changes how requests move, it probably belongs here.

@@ -63,6 +63,13 @@ This separation is especially valuable once both reference and pipeline cores ne
 - Keep this crate descriptive and mostly side-effect free.
 - Only put behavior here when it is part of the ISA description itself rather than part of a particular CPU implementation choice.
 
+## How To Validate
+
+- `cargo test -p rvsim-isa`
+  Runs decoder, CSR-address, and instruction-classification regressions.
+- `cargo test -p rvsim-cpu`
+  Recommended after ISA changes, because decode and trap vocabulary feed directly into CPU behavior.
+
 ## Extension Notes
 
 - New architectural features usually start here before they become executable behavior in `rvsim_cpu`.

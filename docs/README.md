@@ -46,3 +46,12 @@ The two layers are intended to complement each other rather than duplicate the s
   [crates/cpu/src/pipeline/README.md](../crates/cpu/src/pipeline/README.md) ->
   [crates/cpu/src/predictor/README.md](../crates/cpu/src/predictor/README.md) ->
   [future_ooo.md](../docs/future_ooo.md)
+
+## Validation Entry Points
+
+- CPU-oriented documents usually map to `cargo test -p rvsim-cpu`.
+- bus, cache, and memory-system documents usually map to `cargo test -p rvsim-system`.
+- device documents usually map to `cargo test -p rvsim-devices`.
+- experiment-facing documents usually map to `cargo run -p rvsim-computer` or `cargo run -p rvsim-computer --bin memory_microbench`.
+
+Use the nearest module `README.md` when you want the most specific validation command for one subsystem.

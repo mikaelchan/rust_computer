@@ -57,6 +57,15 @@ This makes `main.rs` closer to a system integration notebook than to a minimal C
 
 This keeps the measurement logic explicit and reusable.
 
+## How To Validate
+
+- `cargo run -p rvsim-computer`
+  Runs the end-to-end example machine.
+- `cargo run -p rvsim-computer --bin memory_microbench`
+  Runs the focused cache and interrupt microbenchmark suite.
+- `cargo test -p rvsim-computer`
+  Runs application-layer regression tests around the benchmark harness.
+
 ## Extension Pattern
 
 - Put reusable experiment helpers in `microbench.rs` or sibling modules.

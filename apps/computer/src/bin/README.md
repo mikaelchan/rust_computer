@@ -30,6 +30,13 @@ That split prevents binaries from turning into untestable one-off scripts.
 
 Future binaries should follow the same pattern unless they truly need interactive behavior.
 
+## How To Validate
+
+- `cargo run -p rvsim-computer --bin memory_microbench`
+  Verifies the current binary end to end.
+- `cargo test -p rvsim-computer`
+  Verifies the underlying library-side benchmark code.
+
 ## Related Reading
 
 - [computer app](../../../../apps/computer/src/README.md)

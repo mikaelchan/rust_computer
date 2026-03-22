@@ -65,6 +65,15 @@ If one change starts touching all of those at once, it is usually a sign that th
 - The pipelined core prioritizes realistic ordering. It can have a front-end PC ahead of the committed architectural PC, in-flight latches, branch prediction state, and explicit flush causes.
 - Tests should compare committed behavior first. Timing-sensitive checks should explicitly document where the two models are expected to differ.
 
+## How To Validate
+
+- `cargo test -p rvsim-cpu`
+  Runs the CPU unit tests and integration tests.
+- `cargo test -p rvsim-cpu --test program_suite`
+  Runs the shared architectural program images against both core models.
+- `cargo test`
+  Useful when a CPU change may also affect caches, devices, or the application layer.
+
 ## Extension Notes
 
 - Add new ISA behavior in `exec` and decode support in `rvsim_isa` before touching core-specific control flow.
