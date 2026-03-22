@@ -31,6 +31,14 @@ The current milestone targets `RV32I + machine mode + a first supervisor trap sl
 4. Read [../crates/cpu/src/README.md](../crates/cpu/src/README.md) for execution and privilege behavior.
 5. Read [memory_experiments.md](./memory_experiments.md) for experiment workflows.
 
+## Related Reading
+
+- [cpu_plan.md](./cpu_plan.md)
+- [future_ooo.md](./future_ooo.md)
+- [memory_map.md](./memory_map.md)
+- [memory_experiments.md](./memory_experiments.md)
+- [../README.md](../README.md)
+
 ## How To Validate
 
 - `cargo test`
