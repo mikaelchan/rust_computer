@@ -27,8 +27,8 @@ This crate contains memory-mapped device models that plug into the shared bus.
 
 ## Related Reading
 
-- [repository index](/Users/michael/Workspace/rust_computer/README.md)
-- [system crate](/Users/michael/Workspace/rust_computer/crates/system/src/README.md)
-- [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md)
-- [memory map](/Users/michael/Workspace/rust_computer/docs/memory_map.md)
-- [memory experiments guide](/Users/michael/Workspace/rust_computer/docs/memory_experiments.md)
+- [repository index](../../../README.md)
+- [system crate](../../../crates/system/src/README.md)
+- [architecture overview](../../../docs/architecture.md)
+- [memory map](../../../docs/memory_map.md)
+- [memory experiments guide](../../../docs/memory_experiments.md)

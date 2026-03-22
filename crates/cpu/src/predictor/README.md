@@ -21,7 +21,7 @@ This module defines the branch-prediction surface used by the pipelined core.
 
 ## Related Reading
 
-- [pipeline stages](/Users/michael/Workspace/rust_computer/crates/cpu/src/pipeline/README.md)
-- [cpu core models](/Users/michael/Workspace/rust_computer/crates/cpu/src/core/README.md)
-- [CPU plan](/Users/michael/Workspace/rust_computer/docs/cpu_plan.md)
-- [future out-of-order track](/Users/michael/Workspace/rust_computer/docs/future_ooo.md)
+- [pipeline stages](../../../../crates/cpu/src/pipeline/README.md)
+- [cpu core models](../../../../crates/cpu/src/core/README.md)
+- [CPU plan](../../../../docs/cpu_plan.md)
+- [future out-of-order track](../../../../docs/future_ooo.md)

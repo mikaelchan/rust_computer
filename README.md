@@ -32,18 +32,18 @@ The codebase currently focuses on a cycle-driven `RV32I` machine with:
 
 Directory-backed modules now carry their own `README.md` files:
 
-- [computer app](/Users/michael/Workspace/rust_computer/apps/computer/src/README.md)
-- [app binaries](/Users/michael/Workspace/rust_computer/apps/computer/src/bin/README.md)
-- [cpu crate](/Users/michael/Workspace/rust_computer/crates/cpu/src/README.md)
-- [cpu core models](/Users/michael/Workspace/rust_computer/crates/cpu/src/core/README.md)
-- [execution helpers](/Users/michael/Workspace/rust_computer/crates/cpu/src/exec/README.md)
-- [hazard logic](/Users/michael/Workspace/rust_computer/crates/cpu/src/hazard/README.md)
-- [pipeline stages](/Users/michael/Workspace/rust_computer/crates/cpu/src/pipeline/README.md)
-- [branch prediction](/Users/michael/Workspace/rust_computer/crates/cpu/src/predictor/README.md)
-- [architectural state](/Users/michael/Workspace/rust_computer/crates/cpu/src/state/README.md)
-- [devices crate](/Users/michael/Workspace/rust_computer/crates/devices/src/README.md)
-- [isa crate](/Users/michael/Workspace/rust_computer/crates/isa/src/README.md)
-- [system crate](/Users/michael/Workspace/rust_computer/crates/system/src/README.md)
+- [computer app](./apps/computer/src/README.md)
+- [app binaries](./apps/computer/src/bin/README.md)
+- [cpu crate](./crates/cpu/src/README.md)
+- [cpu core models](./crates/cpu/src/core/README.md)
+- [execution helpers](./crates/cpu/src/exec/README.md)
+- [hazard logic](./crates/cpu/src/hazard/README.md)
+- [pipeline stages](./crates/cpu/src/pipeline/README.md)
+- [branch prediction](./crates/cpu/src/predictor/README.md)
+- [architectural state](./crates/cpu/src/state/README.md)
+- [devices crate](./crates/devices/src/README.md)
+- [isa crate](./crates/isa/src/README.md)
+- [system crate](./crates/system/src/README.md)
 
 Single-file top-level modules are documented from their parent module indexes:
 
@@ -52,32 +52,32 @@ Single-file top-level modules are documented from their parent module indexes:
 
 ## Design Documents
 
-The higher-level design and experiment notes live under [`docs/`](/Users/michael/Workspace/rust_computer/docs):
+The higher-level design and experiment notes live under [`docs/`](./docs):
 
-- [docs index](/Users/michael/Workspace/rust_computer/docs/README.md)
-- [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md)
-- [CPU plan](/Users/michael/Workspace/rust_computer/docs/cpu_plan.md)
-- [future out-of-order track](/Users/michael/Workspace/rust_computer/docs/future_ooo.md)
-- [memory experiments guide](/Users/michael/Workspace/rust_computer/docs/memory_experiments.md)
-- [memory map](/Users/michael/Workspace/rust_computer/docs/memory_map.md)
+- [docs index](./docs/README.md)
+- [architecture overview](./docs/architecture.md)
+- [CPU plan](./docs/cpu_plan.md)
+- [future out-of-order track](./docs/future_ooo.md)
+- [memory experiments guide](./docs/memory_experiments.md)
+- [memory map](./docs/memory_map.md)
 
 ## Suggested Reading Paths
 
 - CPU architecture work:
-  [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md) ->
-  [cpu crate](/Users/michael/Workspace/rust_computer/crates/cpu/src/README.md) ->
-  [architectural state](/Users/michael/Workspace/rust_computer/crates/cpu/src/state/README.md) ->
-  [cpu core models](/Users/michael/Workspace/rust_computer/crates/cpu/src/core/README.md) ->
-  [pipeline stages](/Users/michael/Workspace/rust_computer/crates/cpu/src/pipeline/README.md)
+  [architecture overview](./docs/architecture.md) ->
+  [cpu crate](./crates/cpu/src/README.md) ->
+  [architectural state](./crates/cpu/src/state/README.md) ->
+  [cpu core models](./crates/cpu/src/core/README.md) ->
+  [pipeline stages](./crates/cpu/src/pipeline/README.md)
 - Memory-system work:
-  [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md) ->
-  [system crate](/Users/michael/Workspace/rust_computer/crates/system/src/README.md) ->
-  [devices crate](/Users/michael/Workspace/rust_computer/crates/devices/src/README.md) ->
-  [memory experiments guide](/Users/michael/Workspace/rust_computer/docs/memory_experiments.md)
+  [architecture overview](./docs/architecture.md) ->
+  [system crate](./crates/system/src/README.md) ->
+  [devices crate](./crates/devices/src/README.md) ->
+  [memory experiments guide](./docs/memory_experiments.md)
 - Tooling and runnable experiments:
-  [computer app](/Users/michael/Workspace/rust_computer/apps/computer/src/README.md) ->
-  [app binaries](/Users/michael/Workspace/rust_computer/apps/computer/src/bin/README.md) ->
-  [docs index](/Users/michael/Workspace/rust_computer/docs/README.md)
+  [computer app](./apps/computer/src/README.md) ->
+  [app binaries](./apps/computer/src/bin/README.md) ->
+  [docs index](./docs/README.md)
 
 ## Typical Commands
 

@@ -23,8 +23,8 @@ This directory contains the runnable application layer for the project.
 
 ## Related Reading
 
-- [repository index](/Users/michael/Workspace/rust_computer/README.md)
-- [docs index](/Users/michael/Workspace/rust_computer/docs/README.md)
-- [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md)
-- [memory experiments guide](/Users/michael/Workspace/rust_computer/docs/memory_experiments.md)
-- [app binaries](/Users/michael/Workspace/rust_computer/apps/computer/src/bin/README.md)
+- [repository index](../../../README.md)
+- [docs index](../../../docs/README.md)
+- [architecture overview](../../../docs/architecture.md)
+- [memory experiments guide](../../../docs/memory_experiments.md)
+- [app binaries](../../../apps/computer/src/bin/README.md)

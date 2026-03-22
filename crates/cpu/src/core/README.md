@@ -27,8 +27,8 @@ This module owns the top-level CPU implementations.
 
 ## Related Reading
 
-- [cpu crate](/Users/michael/Workspace/rust_computer/crates/cpu/src/README.md)
-- [pipeline stages](/Users/michael/Workspace/rust_computer/crates/cpu/src/pipeline/README.md)
-- [hazard logic](/Users/michael/Workspace/rust_computer/crates/cpu/src/hazard/README.md)
-- [architectural state](/Users/michael/Workspace/rust_computer/crates/cpu/src/state/README.md)
-- [CPU plan](/Users/michael/Workspace/rust_computer/docs/cpu_plan.md)
+- [cpu crate](../../../../crates/cpu/src/README.md)
+- [pipeline stages](../../../../crates/cpu/src/pipeline/README.md)
+- [hazard logic](../../../../crates/cpu/src/hazard/README.md)
+- [architectural state](../../../../crates/cpu/src/state/README.md)
+- [CPU plan](../../../../docs/cpu_plan.md)

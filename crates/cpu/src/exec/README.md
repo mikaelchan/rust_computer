@@ -29,7 +29,7 @@ This module contains instruction semantics shared by both CPU cores.
 
 ## Related Reading
 
-- [cpu crate](/Users/michael/Workspace/rust_computer/crates/cpu/src/README.md)
-- [isa crate](/Users/michael/Workspace/rust_computer/crates/isa/src/README.md)
-- [architectural state](/Users/michael/Workspace/rust_computer/crates/cpu/src/state/README.md)
-- [cpu core models](/Users/michael/Workspace/rust_computer/crates/cpu/src/core/README.md)
+- [cpu crate](../../../../crates/cpu/src/README.md)
+- [isa crate](../../../../crates/isa/src/README.md)
+- [architectural state](../../../../crates/cpu/src/state/README.md)
+- [cpu core models](../../../../crates/cpu/src/core/README.md)

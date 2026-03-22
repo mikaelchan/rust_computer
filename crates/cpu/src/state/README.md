@@ -27,7 +27,7 @@ This module owns the CPU state that exists at architectural boundaries.
 
 ## Related Reading
 
-- [cpu crate](/Users/michael/Workspace/rust_computer/crates/cpu/src/README.md)
-- [execution helpers](/Users/michael/Workspace/rust_computer/crates/cpu/src/exec/README.md)
-- [system crate](/Users/michael/Workspace/rust_computer/crates/system/src/README.md)
-- [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md)
+- [cpu crate](../../../../crates/cpu/src/README.md)
+- [execution helpers](../../../../crates/cpu/src/exec/README.md)
+- [system crate](../../../../crates/system/src/README.md)
+- [architecture overview](../../../../docs/architecture.md)

@@ -29,7 +29,7 @@ This crate defines the ISA-level language understood by the CPU models.
 
 ## Related Reading
 
-- [repository index](/Users/michael/Workspace/rust_computer/README.md)
-- [cpu crate](/Users/michael/Workspace/rust_computer/crates/cpu/src/README.md)
-- [execution helpers](/Users/michael/Workspace/rust_computer/crates/cpu/src/exec/README.md)
-- [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md)
+- [repository index](../../../README.md)
+- [cpu crate](../../../crates/cpu/src/README.md)
+- [execution helpers](../../../crates/cpu/src/exec/README.md)
+- [architecture overview](../../../docs/architecture.md)

@@ -35,9 +35,9 @@ This crate contains the architectural and microarchitectural CPU model.
 
 ## Related Reading
 
-- [repository index](/Users/michael/Workspace/rust_computer/README.md)
-- [architecture overview](/Users/michael/Workspace/rust_computer/docs/architecture.md)
-- [CPU plan](/Users/michael/Workspace/rust_computer/docs/cpu_plan.md)
-- [future out-of-order track](/Users/michael/Workspace/rust_computer/docs/future_ooo.md)
-- [cpu core models](/Users/michael/Workspace/rust_computer/crates/cpu/src/core/README.md)
-- [architectural state](/Users/michael/Workspace/rust_computer/crates/cpu/src/state/README.md)
+- [repository index](../../../README.md)
+- [architecture overview](../../../docs/architecture.md)
+- [CPU plan](../../../docs/cpu_plan.md)
+- [future out-of-order track](../../../docs/future_ooo.md)
+- [cpu core models](../../../crates/cpu/src/core/README.md)
+- [architectural state](../../../crates/cpu/src/state/README.md)

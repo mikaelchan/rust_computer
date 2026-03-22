@@ -18,6 +18,6 @@ This directory holds extra executable entry points for the `computer` applicatio
 
 ## Related Reading
 
-- [computer app](/Users/michael/Workspace/rust_computer/apps/computer/src/README.md)
-- [repository index](/Users/michael/Workspace/rust_computer/README.md)
-- [memory experiments guide](/Users/michael/Workspace/rust_computer/docs/memory_experiments.md)
+- [computer app](../../../../apps/computer/src/README.md)
+- [repository index](../../../../README.md)
+- [memory experiments guide](../../../../docs/memory_experiments.md)

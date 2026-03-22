@@ -27,8 +27,8 @@ This module contains the building blocks of the in-order pipeline.
 
 ## Related Reading
 
-- [cpu core models](/Users/michael/Workspace/rust_computer/crates/cpu/src/core/README.md)
-- [hazard logic](/Users/michael/Workspace/rust_computer/crates/cpu/src/hazard/README.md)
-- [branch prediction](/Users/michael/Workspace/rust_computer/crates/cpu/src/predictor/README.md)
-- [architectural state](/Users/michael/Workspace/rust_computer/crates/cpu/src/state/README.md)
-- [CPU plan](/Users/michael/Workspace/rust_computer/docs/cpu_plan.md)
+- [cpu core models](../../../../crates/cpu/src/core/README.md)
+- [hazard logic](../../../../crates/cpu/src/hazard/README.md)
+- [branch prediction](../../../../crates/cpu/src/predictor/README.md)
+- [architectural state](../../../../crates/cpu/src/state/README.md)
+- [CPU plan](../../../../docs/cpu_plan.md)
