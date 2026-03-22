@@ -16,6 +16,20 @@ This directory holds extra executable entry points for the `computer` applicatio
 - Add a new binary here when the workflow is operationally distinct.
 - Keep shared setup code in `../lib.rs` or sibling modules so binaries stay thin.
 
+## Output Philosophy
+
+- Binaries in this directory should mainly adapt typed library results into human-readable output.
+- Measurement logic, machine construction, and validation-oriented helpers should stay in the library side of the app package.
+
+That split prevents binaries from turning into untestable one-off scripts.
+
+## Current Pattern
+
+- `memory_microbench.rs` calls into `run_memory_microbenchmarks()`.
+- The binary then formats the returned report into compact console lines.
+
+Future binaries should follow the same pattern unless they truly need interactive behavior.
+
 ## Related Reading
 
 - [computer app](../../../../apps/computer/src/README.md)
