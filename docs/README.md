@@ -14,6 +14,8 @@ This directory holds project-level design notes that sit above the code-adjacent
   Practical experiment guide for caches, DRAM, DMA, and interrupt-latency studies.
 - [memory_map.md](../docs/memory_map.md)
   Suggested physical address layout for the current machine.
+- [documentation_conventions.md](../docs/documentation_conventions.md)
+  Repository rules for where docs live, which sections they should contain, and how links and validation commands should be written.
 
 ## When To Read What
 
@@ -55,3 +57,7 @@ The two layers are intended to complement each other rather than duplicate the s
 - experiment-facing documents usually map to `cargo run -p rvsim-computer` or `cargo run -p rvsim-computer --bin memory_microbench`.
 
 Use the nearest module `README.md` when you want the most specific validation command for one subsystem.
+
+## Maintenance Rule
+
+When adding or reshaping documentation, follow [documentation_conventions.md](../docs/documentation_conventions.md) so module READMEs and design docs keep the same structure and linking style.

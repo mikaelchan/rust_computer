@@ -60,6 +60,7 @@ The higher-level design and experiment notes live under [`docs/`](./docs):
 - [future out-of-order track](./docs/future_ooo.md)
 - [memory experiments guide](./docs/memory_experiments.md)
 - [memory map](./docs/memory_map.md)
+- [documentation conventions](./docs/documentation_conventions.md)
 
 ## Suggested Reading Paths
 
@@ -95,5 +96,6 @@ The higher-level design and experiment notes live under [`docs/`](./docs):
 - Put module-level knowledge in the nearest directory `README.md`.
 - Keep broader architecture and roadmap material in `docs/`.
 - Keep milestone tracking in `TODO.md`.
+- Use relative links inside repository documentation.
 
-That split keeps code-adjacent explanations near the implementation while preserving a smaller set of higher-level design documents.
+That split keeps code-adjacent explanations near the implementation while preserving a smaller set of higher-level design documents. The full maintenance rules live in [docs/documentation_conventions.md](./docs/documentation_conventions.md).
