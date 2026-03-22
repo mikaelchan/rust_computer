@@ -23,15 +23,20 @@ const VM_ROOT_TABLE_2: u64 = RAM_BASE + 0x2000;
 const VM_LEAF_TABLE_2: u64 = RAM_BASE + 0x3000;
 const VM_PHYS_PAGE_A: u64 = RAM_BASE + 0x4000;
 const VM_PHYS_PAGE_B: u64 = RAM_BASE + 0x5000;
+const VM_ROOT_TABLE_3: u64 = RAM_BASE + 0x6000;
 const VM_VIRTUAL_ADDR: u32 = 0x4000;
 const VM_VALUE_A: u32 = 0x1111_2222;
 const VM_VALUE_B: u32 = 0x3333_4444;
+const VM_SUPERPAGE_VIRTUAL_ADDR: u32 = 0x0040_5000;
+const VM_SUPERPAGE_PHYSICAL_ADDR: u64 = RAM_BASE + 0x5000;
+const VM_SUPERPAGE_STORE_VALUE: u32 = 0x5555_6666;
 
 const STORE_LOAD_PROGRAM: &str = include_str!("programs/store_load.hex");
 const COUNT_LOOP_PROGRAM: &str = include_str!("programs/count_loop.hex");
 const MSIP_INTERRUPT_PROGRAM: &str = include_str!("programs/msip_interrupt.hex");
 const SV32_ASID_SWITCH_PROGRAM: &str = include_str!("programs/sv32_asid_switch.hex");
 const SV32_SFENCE_REMAP_PROGRAM: &str = include_str!("programs/sv32_sfence_remap.hex");
+const SV32_SUPERPAGE_PROGRAM: &str = include_str!("programs/sv32_superpage.hex");
 
 fn parse_program_image(source: &str) -> Vec<u32> {
     source
@@ -214,6 +219,35 @@ where
     );
 }
 
+fn assert_sv32_superpage_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SV32_SUPERPAGE_PROGRAM,
+        VM_RAM_BYTES,
+        setup_sv32_superpage_state,
+    );
+
+    step_until(&mut machine, 48, |machine| {
+        machine.cpu().hart_state().registers.read(11) == VM_SUPERPAGE_STORE_VALUE
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), VM_VALUE_B);
+    assert_eq!(
+        machine.cpu().hart_state().registers.read(11),
+        VM_SUPERPAGE_STORE_VALUE
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(VM_SUPERPAGE_PHYSICAL_ADDR + 4)
+            .expect("superpage store target should remain readable"),
+        VM_SUPERPAGE_STORE_VALUE
+    );
+}
+
 fn setup_sv32_asid_switch_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -310,6 +344,40 @@ where
         .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
 }
 
+fn setup_sv32_superpage_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    write_word(machine, VM_SUPERPAGE_PHYSICAL_ADDR, VM_VALUE_B);
+    install_sv32_superpage_mapping(
+        machine,
+        VM_ROOT_TABLE_3,
+        VM_SUPERPAGE_VIRTUAL_ADDR,
+        RAM_BASE as u32,
+        PTE_R | PTE_W | PTE_A | PTE_D,
+    );
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(1, VM_SUPERPAGE_VIRTUAL_ADDR);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(2, sv32_satp_with_asid(VM_ROOT_TABLE_3, 1));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(4, VM_SUPERPAGE_STORE_VALUE);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+}
+
 fn write_word<P>(machine: &mut Machine<P, MemoryMap>, addr: u64, value: u32)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -342,6 +410,23 @@ fn install_sv32_mapping<P>(
         machine,
         leaf_table + leaf_index * 4,
         sv32_leaf_pte(physical_address, flags),
+    );
+}
+
+fn install_sv32_superpage_mapping<P>(
+    machine: &mut Machine<P, MemoryMap>,
+    root_table: u64,
+    virtual_address: u32,
+    physical_base: u32,
+    flags: u32,
+) where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let root_index = ((virtual_address >> 22) & 0x3ff) as u64;
+    write_word(
+        machine,
+        root_table + root_index * 4,
+        sv32_leaf_pte(physical_base, flags),
     );
 }
 
@@ -401,4 +486,14 @@ fn reference_core_runs_sv32_sfence_remap_program() {
 #[test]
 fn pipeline_core_runs_sv32_sfence_remap_program() {
     assert_sv32_sfence_remap_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_sv32_superpage_program() {
+    assert_sv32_superpage_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_sv32_superpage_program() {
+    assert_sv32_superpage_program(PipelineCore::new);
 }

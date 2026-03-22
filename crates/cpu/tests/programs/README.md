@@ -24,6 +24,7 @@ Current checked-in examples now cover:
 - machine software interrupt delivery
 - `Sv32` ASID namespace switching
 - pagetable remap visibility across `sfence.vma`
+- `Sv32` root-leaf superpage data access
 
 ## Extension Notes
 

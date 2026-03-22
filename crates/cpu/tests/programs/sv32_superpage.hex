@@ -1,0 +1,17 @@
+# Sv32 superpage data-path smoke test.
+# Host setup preloads:
+# - x1 = translated virtual address inside a root-leaf superpage mapping
+# - x2 = satp for the address space
+# - x4 = value to store through the translated address
+# - mstatus.MPRV with MPP=Supervisor
+# Expect x10 = initial value and x11 = stored value after the translated store/load pair.
+# Trailing nops leave safe speculative fetch space for the pipeline core.
+0x18011073
+0x0000a503
+0x0040a223
+0x0040a583
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
