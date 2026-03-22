@@ -17,6 +17,14 @@ The integration test harness parses these files directly so the same program ima
 - They are small enough to inspect manually when bring-up or interrupt sequencing breaks.
 - They can later be reused by the computer application, benchmark runners, or external loaders without inventing a second test-program format.
 
+Current checked-in examples now cover:
+
+- simple load/store behavior
+- simple counted control flow
+- machine software interrupt delivery
+- `Sv32` ASID namespace switching
+- pagetable remap visibility across `sfence.vma`
+
 ## Extension Notes
 
 - Keep programs short and purpose-specific so failures remain easy to localize.
@@ -31,6 +39,8 @@ The integration test harness parses these files directly so the same program ima
   Narrow reference-core validation for the software-interrupt program image.
 - `cargo test -p rvsim-cpu --test program_suite pipeline_core_runs_store_load_program`
   Narrow pipeline-core validation for the basic load/store program image.
+- `cargo test -p rvsim-cpu --test program_suite pipeline_core_runs_sv32_asid_switch_program`
+  Narrow pipeline-core validation for the `Sv32` ASID namespace program image.
 
 ## Related Reading
 

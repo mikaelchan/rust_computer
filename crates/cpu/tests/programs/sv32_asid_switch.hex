@@ -1,0 +1,19 @@
+# Sv32 ASID namespace smoke test.
+# Host setup preloads:
+# - x1 = translated virtual address
+# - x2 = satp for ASID 1 mapping to value A
+# - x3 = satp for ASID 2 mapping to value B
+# - mstatus.MPRV with MPP=Supervisor
+# Expect x10 = A, x11 = B, x12 = A after switching ASIDs.
+# Trailing nops leave safe speculative fetch space for the pipeline core.
+0x18011073
+0x0000a503
+0x18019073
+0x0000a583
+0x18011073
+0x0000a603
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013

@@ -17,6 +17,7 @@ This directory holds integration-oriented CPU regressions that execute the publi
 
 - The integration harness builds a minimal machine with ROM, RAM, and a machine software interrupt source.
 - Each program image is executed on both `ReferenceCore` and `PipelineCore`.
+- Some programs also use host-side setup to preload page tables, CSR state, or register inputs before execution starts.
 - Stop conditions check architectural state such as registers, PC, or trap CSRs rather than insisting on identical cycle timing.
 
 That split is intentional. Unit tests prove local invariants; integration tests prove that those invariants still compose into the same visible machine behavior.
@@ -35,6 +36,8 @@ That split is intentional. Unit tests prove local invariants; integration tests 
   Narrows validation to the reference core's software-interrupt program path.
 - `cargo test -p rvsim-cpu --test program_suite pipeline_core_runs_count_loop_program`
   Narrows validation to the pipelined core's simple control-flow program path.
+- `cargo test -p rvsim-cpu --test program_suite reference_core_runs_sv32_sfence_remap_program`
+  Narrows validation to the reference core's pagetable-remap plus `sfence.vma` program path.
 
 ## Related Reading
 

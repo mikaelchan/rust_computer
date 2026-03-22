@@ -1,0 +1,23 @@
+# Sv32 stale-translation and sfence.vma smoke test.
+# Host setup preloads:
+# - x1 = translated virtual address
+# - x2 = satp for the address space
+# - x3 = physical leaf-PTE address to rewrite
+# - x4 = replacement leaf PTE mapping to value B
+# - x6 = mstatus with MPRV and MPP=Supervisor
+# - x7 = mstatus with only MPP=Supervisor
+# Expect x10 = A, x11 = A, x12 = B after rewriting the PTE and fencing.
+# Trailing nops leave safe speculative fetch space for the pipeline core.
+0x18011073
+0x0000a503
+0x30039073
+0x0041a023
+0x30031073
+0x0000a583
+0x12000073
+0x0000a603
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
