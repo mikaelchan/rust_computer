@@ -55,6 +55,17 @@ That keeps this module readable as the pipeline grows.
 - If a new feature introduces a stall or flush condition, document it here first.
 - Prefer small, explicit hazard predicates over one large opaque controller.
 
+## How To Validate
+
+- `cargo test -p rvsim-cpu core::pipeline::tests::flushes_wrong_path_after_taken_branch`
+  Validates the control-hazard path that turns a wrong prediction into a pipeline flush.
+- `cargo test -p rvsim-cpu core::pipeline::tests::inserts_load_use_stall_and_then_forwards_loaded_value`
+  Validates the current RAW-hazard policy and replay behavior.
+- `cargo test -p rvsim-cpu core::pipeline::tests::split_l1_cache_feeds_pipeline_front_end_and_data_path_separately`
+  Validates the structural-hazard side of shared versus split memory resources.
+
+There is no hazard-only test module yet. Today, the narrowest useful validation surface is still the pipelined-core regression set that consumes these predicates.
+
 ## Related Reading
 
 - [cpu crate](../../../../crates/cpu/src/README.md)

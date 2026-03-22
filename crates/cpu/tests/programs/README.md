@@ -1,11 +1,40 @@
-## Program Image Format
+# regression program images
 
-These files are versioned architectural regression programs for `rvsim-cpu`.
+This directory holds versioned architectural regression programs for `rvsim-cpu`.
+
+## Program Image Format
 
 - One 32-bit RV32 machine word per line.
 - Hex words use the `0x12345678` form.
 - Blank lines are ignored.
 - `#` starts a comment until end of line.
 
-The integration test harness parses these files directly so the same program
-images can be reused across CPU models and future experiment runners.
+The integration test harness parses these files directly so the same program images can be reused across CPU models and future experiment runners.
+
+## Why These Files Are Versioned
+
+- They provide a stable cross-core regression surface that does not depend on one specific unit-test fixture.
+- They are small enough to inspect manually when bring-up or interrupt sequencing breaks.
+- They can later be reused by the computer application, benchmark runners, or external loaders without inventing a second test-program format.
+
+## Extension Notes
+
+- Keep programs short and purpose-specific so failures remain easy to localize.
+- Prefer one behavioral axis per program, such as load/store ordering, simple control flow, or one interrupt delivery path.
+- When a new program captures an architectural rule, add or update a matching integration test in `program_suite.rs`.
+
+## How To Validate
+
+- `cargo test -p rvsim-cpu --test program_suite`
+  Replays every checked-in program image against both the reference and pipelined cores.
+- `cargo test -p rvsim-cpu --test program_suite reference_core_runs_msip_interrupt_program`
+  Narrow reference-core validation for the software-interrupt program image.
+- `cargo test -p rvsim-cpu --test program_suite pipeline_core_runs_store_load_program`
+  Narrow pipeline-core validation for the basic load/store program image.
+
+## Related Reading
+
+- [cpu crate](../../src/README.md)
+- [cpu core models](../../src/core/README.md)
+- [computer app](../../../../apps/computer/src/README.md)
+- [architecture overview](../../../../docs/architecture.md)

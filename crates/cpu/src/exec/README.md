@@ -65,6 +65,15 @@ The deferred-write shape is one of the main reasons this module composes cleanly
 
 - When adding a new instruction, prefer extending this module first so both core models inherit the same architectural meaning.
 
+## How To Validate
+
+- `cargo test -p rvsim-cpu exec::`
+  Covers the direct execution-helper unit tests such as ALU and CSR helper behavior.
+- `cargo test -p rvsim-cpu core::reference::tests::executes_csr_read_write_sequence`
+  Confirms the reference core consumes the shared execution results correctly.
+- `cargo test -p rvsim-cpu core::pipeline::tests::delegates_user_ecall_to_supervisor_handler_and_returns_with_sret`
+  Confirms trap-producing system instructions still compose with the pipelined core.
+
 ## Related Reading
 
 - [cpu crate](../../../../crates/cpu/src/README.md)

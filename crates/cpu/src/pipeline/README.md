@@ -64,6 +64,17 @@ If it affects timing or observability, the answer is often yes.
 - Pipeline latches are treated as first-class state, which is important for precise exceptions, forwarding, and replay.
 - Branch prediction and hazard logic live outside this directory so the stages stay focused on per-stage work rather than global policy.
 
+## How To Validate
+
+- `cargo test -p rvsim-cpu core::pipeline::tests`
+  Runs the full pipeline regression set across MMU, interrupts, cache timing, and privilege transitions.
+- `cargo test -p rvsim-cpu core::pipeline::tests::inserts_load_use_stall_and_then_forwards_loaded_value`
+  Checks the stage-to-stage stall and replay path around a classic load-use hazard.
+- `cargo test -p rvsim-cpu core::pipeline::tests::tracks_trap_flushes_in_trace_and_stats`
+  Checks that flush classification and observability stay aligned with precise-trap behavior.
+- `cargo test -p rvsim-cpu core::pipeline::tests::split_l1_cache_feeds_pipeline_front_end_and_data_path_separately`
+  Exercises the pipeline against the more realistic split-cache memory path.
+
 ## Related Reading
 
 - [cpu core models](../../../../crates/cpu/src/core/README.md)

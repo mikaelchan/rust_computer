@@ -55,6 +55,15 @@ The core implementations should orchestrate those subsystems, not duplicate thei
 - Add shared semantics outside this directory when possible.
 - Keep core-local logic focused on scheduling, trapping boundaries, and interaction with the bus/MMU over time.
 
+## How To Validate
+
+- `cargo test -p rvsim-cpu core::reference::tests`
+  Exercises the architectural baseline core, including privilege, MMU, and interrupt flows.
+- `cargo test -p rvsim-cpu core::pipeline::tests`
+  Exercises the in-order pipelined core, including stalls, flushes, prediction, and precise interrupts.
+- `cargo test -p rvsim-cpu --test program_suite`
+  Replays the shared hex-program regressions against both core models.
+
 ## Related Reading
 
 - [cpu crate](../../../../crates/cpu/src/README.md)

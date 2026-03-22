@@ -51,6 +51,13 @@ That simplicity is useful because it gives visible branch-prediction behavior wi
 - New predictors should implement `BranchPredictor` and keep update semantics explicit.
 - Predictor state should stay local to the predictor implementation rather than leaking into the pipeline core.
 
+## How To Validate
+
+- `cargo test -p rvsim-cpu predictor::bimodal_2bit::tests`
+  Covers the local 2-bit counter behavior without involving the full pipeline.
+- `cargo test -p rvsim-cpu core::pipeline::tests::trains_bimodal_predictor_on_taken_branches`
+  Confirms the fetch and resolution stages wire predictor updates through the in-order pipeline correctly.
+
 ## Related Reading
 
 - [pipeline stages](../../../../crates/cpu/src/pipeline/README.md)

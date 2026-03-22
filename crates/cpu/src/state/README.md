@@ -56,6 +56,15 @@ This avoids duplicating privileged state while still letting the simulator expre
 - Add new privileged features here before layering them into fetch, execute, or pipeline timing.
 - Prefer precise unit tests in `csr_file.rs` whenever trap-state semantics change.
 
+## How To Validate
+
+- `cargo test -p rvsim-cpu state::csr_file::tests`
+  Covers CSR masking, interrupt pending and enable logic, trap entry, and trap return behavior directly at the state layer.
+- `cargo test -p rvsim-cpu core::reference::tests::machine_mode_can_take_nested_machine_interrupt_after_reenabling_mie`
+  Confirms the reference core still consumes the trap-state contract from this module correctly.
+- `cargo test -p rvsim-cpu core::pipeline::tests::supervisor_mode_can_take_nested_supervisor_interrupt_after_reenabling_sie`
+  Confirms the pipelined core still observes the same privileged-state rules at precise commit boundaries.
+
 ## Related Reading
 
 - [cpu crate](../../../../crates/cpu/src/README.md)
