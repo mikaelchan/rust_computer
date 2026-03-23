@@ -1,0 +1,13 @@
+# User-mode cycleh access with both mcounteren and scounteren enabled.
+# Host setup preloads:
+# - privilege = User
+# - mcounteren/scounteren allow cycle reads
+# - mcycleh = 1
+# Program reads cycleh into x1, then spins at PC 0x4.
+# Expect x1 = 1 and cycleh = 1.
+0xc80020f3
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013

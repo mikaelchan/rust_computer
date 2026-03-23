@@ -22,6 +22,10 @@ Current checked-in examples now cover:
 - simple load/store behavior
 - simple counted control flow
 - machine software interrupt delivery
+- user `cycleh` access with enabled counter delegation
+- user `instret` access with enabled counter delegation
+- `Sv32` translated loads from user-accessible pages
+- `Sv32` translated loads from execute-only pages under `MXR`
 - delegated supervisor software interrupt delivery with `sret` return
 - delegated supervisor external interrupt delivery with controller claim/complete
 - delegated supervisor external interrupt delivery from block-device completion

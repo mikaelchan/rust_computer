@@ -22,6 +22,8 @@ const DMA_DEST_ADDR: u64 = RAM_BASE + 0x40;
 const PAGE_SHIFT: u32 = 12;
 const SATP_MODE_SV32: u32 = 1 << 31;
 const MSTATUS_MPRV: u32 = 1 << 17;
+const MSTATUS_SUM: u32 = 1 << 18;
+const MSTATUS_MXR: u32 = 1 << 19;
 const MSTATUS_MPP_SHIFT: u32 = 11;
 const MSTATUS_TVM: u32 = 1 << 20;
 const MSTATUS_TW: u32 = 1 << 21;
@@ -29,6 +31,7 @@ const MSTATUS_TSR: u32 = 1 << 22;
 const PTE_V: u32 = 1 << 0;
 const PTE_R: u32 = 1 << 1;
 const PTE_W: u32 = 1 << 2;
+const PTE_X: u32 = 1 << 3;
 const PTE_U: u32 = 1 << 4;
 const PTE_G: u32 = 1 << 5;
 const PTE_A: u32 = 1 << 6;
@@ -41,6 +44,7 @@ const VM_PHYS_PAGE_A: u64 = RAM_BASE + 0x4000;
 const VM_PHYS_PAGE_B: u64 = RAM_BASE + 0x5000;
 const VM_ROOT_TABLE_3: u64 = RAM_BASE + 0x6000;
 const VM_VIRTUAL_ADDR: u32 = 0x4000;
+const VM_TRANSLATED_LOAD_ADDR: u32 = 0x8000;
 const VM_VALUE_A: u32 = 0x1111_2222;
 const VM_VALUE_B: u32 = 0x3333_4444;
 const VM_SUPERPAGE_VIRTUAL_ADDR: u32 = 0x0040_5000;
@@ -76,6 +80,12 @@ const SUPERVISOR_TW_WFI_TRAP_PROGRAM: &str = include_str!("programs/supervisor_t
 const USER_MACHINE_CSR_TRAP_PROGRAM: &str = include_str!("programs/user_machine_csr_trap.hex");
 const USER_INSTRET_COUNTEREN_TRAP_PROGRAM: &str =
     include_str!("programs/user_instret_counteren_trap.hex");
+const USER_CYCLEH_COUNTEREN_ENABLED_PROGRAM: &str =
+    include_str!("programs/user_cycleh_counteren_enabled.hex");
+const USER_INSTRET_COUNTEREN_ENABLED_PROGRAM: &str =
+    include_str!("programs/user_instret_counteren_enabled.hex");
+const SV32_USER_PAGE_LOAD_PROGRAM: &str = include_str!("programs/sv32_user_page_load.hex");
+const SV32_EXECUTE_ONLY_LOAD_PROGRAM: &str = include_str!("programs/sv32_execute_only_load.hex");
 
 fn parse_program_image(source: &str) -> Vec<u32> {
     source
@@ -377,6 +387,102 @@ where
         VM_VIRTUAL_ADDR
     );
     assert_eq!(machine.cpu().hart_state().registers.read(13), 1);
+}
+
+fn assert_sv32_supervisor_sum_load_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(VM_VIRTUAL_ADDR),
+        SV32_USER_PAGE_LOAD_PROGRAM,
+        VM_RAM_BYTES,
+        setup_sv32_supervisor_sum_load_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().registers.read(10) == VM_VALUE_A
+            && machine.cpu().hart_state().pc == VM_VIRTUAL_ADDR + 8
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), VM_VALUE_A);
+    assert_eq!(machine.cpu().hart_state().pc, VM_VIRTUAL_ADDR + 8);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Supervisor
+    ));
+}
+
+fn assert_sv32_supervisor_mxr_load_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(VM_VIRTUAL_ADDR),
+        SV32_EXECUTE_ONLY_LOAD_PROGRAM,
+        VM_RAM_BYTES,
+        setup_sv32_supervisor_mxr_load_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().registers.read(10) == VM_VALUE_A
+            && machine.cpu().hart_state().pc == VM_VIRTUAL_ADDR + 8
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), VM_VALUE_A);
+    assert_eq!(machine.cpu().hart_state().pc, VM_VIRTUAL_ADDR + 8);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Supervisor
+    ));
+}
+
+fn assert_machine_mprv_supervisor_sum_load_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SV32_USER_PAGE_LOAD_PROGRAM,
+        VM_RAM_BYTES,
+        setup_machine_mprv_supervisor_sum_load_state,
+    );
+
+    step_until(&mut machine, 24, |machine| {
+        machine.cpu().hart_state().registers.read(10) == VM_VALUE_A
+            && machine.cpu().hart_state().pc == 0x8
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), VM_VALUE_A);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Machine
+    ));
+}
+
+fn assert_machine_mprv_supervisor_mxr_load_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SV32_EXECUTE_ONLY_LOAD_PROGRAM,
+        VM_RAM_BYTES,
+        setup_machine_mprv_supervisor_mxr_load_state,
+    );
+
+    step_until(&mut machine, 24, |machine| {
+        machine.cpu().hart_state().registers.read(10) == VM_VALUE_A
+            && machine.cpu().hart_state().pc == 0x8
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), VM_VALUE_A);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Machine
+    ));
 }
 
 fn assert_delegated_user_ecall_program<P>(make_cpu: fn(u32) -> P)
@@ -917,6 +1023,60 @@ where
     ));
 }
 
+fn assert_user_cycleh_counteren_enabled_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        USER_CYCLEH_COUNTEREN_ENABLED_PROGRAM,
+        RAM_BYTES,
+        setup_user_cycleh_counteren_enabled_state,
+    );
+
+    step_until(&mut machine, 24, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 1 && machine.cpu().hart_state().pc == 0x4
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x4);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Cycleh), 1);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::User
+    ));
+}
+
+fn assert_user_instret_counteren_enabled_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        USER_INSTRET_COUNTEREN_ENABLED_PROGRAM,
+        RAM_BYTES,
+        setup_user_instret_counteren_enabled_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().halted
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 0);
+    assert_eq!(machine.cpu().hart_state().registers.read(2), 7);
+    assert_eq!(machine.cpu().hart_state().registers.read(3), 2);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Minstret),
+        4
+    );
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Instret), 4);
+    assert!(machine.cpu().hart_state().halted);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::User
+    ));
+}
+
 fn setup_sv32_asid_switch_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -1144,6 +1304,124 @@ where
         .hart_state_mut()
         .csrs
         .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+}
+
+fn setup_sv32_supervisor_sum_load_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    write_word(machine, VM_PHYS_PAGE_A, VM_VALUE_A);
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_VIRTUAL_ADDR,
+        RESET_VECTOR,
+        PTE_R | PTE_X | PTE_A,
+    );
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_TRANSLATED_LOAD_ADDR,
+        VM_PHYS_PAGE_A as u32,
+        PTE_R | PTE_U | PTE_A | PTE_D,
+    );
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Satp, sv32_satp_with_asid(VM_ROOT_TABLE_1, 1));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Sstatus, MSTATUS_SUM);
+}
+
+fn setup_sv32_supervisor_mxr_load_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    write_word(machine, VM_PHYS_PAGE_A, VM_VALUE_A);
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_VIRTUAL_ADDR,
+        RESET_VECTOR,
+        PTE_R | PTE_X | PTE_A,
+    );
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_TRANSLATED_LOAD_ADDR,
+        VM_PHYS_PAGE_A as u32,
+        PTE_X | PTE_A,
+    );
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Satp, sv32_satp_with_asid(VM_ROOT_TABLE_1, 1));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Sstatus, MSTATUS_MXR);
+}
+
+fn setup_machine_mprv_supervisor_sum_load_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    write_word(machine, VM_PHYS_PAGE_A, VM_VALUE_A);
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_TRANSLATED_LOAD_ADDR,
+        VM_PHYS_PAGE_A as u32,
+        PTE_R | PTE_U | PTE_A | PTE_D,
+    );
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Machine;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Satp, sv32_satp_with_asid(VM_ROOT_TABLE_1, 1));
+    machine.cpu_mut().hart_state_mut().csrs.write(
+        CsrAddress::Mstatus,
+        MSTATUS_MPRV | MSTATUS_SUM | (1 << MSTATUS_MPP_SHIFT),
+    );
+}
+
+fn setup_machine_mprv_supervisor_mxr_load_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    write_word(machine, VM_PHYS_PAGE_A, VM_VALUE_A);
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_TRANSLATED_LOAD_ADDR,
+        VM_PHYS_PAGE_A as u32,
+        PTE_X | PTE_A,
+    );
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Machine;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Satp, sv32_satp_with_asid(VM_ROOT_TABLE_1, 1));
+    machine.cpu_mut().hart_state_mut().csrs.write(
+        CsrAddress::Mstatus,
+        MSTATUS_MPRV | MSTATUS_MXR | (1 << MSTATUS_MPP_SHIFT),
+    );
 }
 
 fn setup_delegated_user_ecall_state<P>(machine: &mut Machine<P, MemoryMap>)
@@ -1446,6 +1724,45 @@ where
         .write(CsrAddress::Mcounteren, 1 << 2);
 }
 
+fn setup_user_cycleh_counteren_enabled_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::User;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mcounteren, 1 << 0);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Scounteren, 1 << 0);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mcycleh, 1);
+}
+
+fn setup_user_instret_counteren_enabled_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::User;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mcounteren, 1 << 2);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Scounteren, 1 << 2);
+}
+
 fn write_word<P>(machine: &mut Machine<P, MemoryMap>, addr: u64, value: u32)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -1587,6 +1904,46 @@ fn pipeline_core_runs_sv32_sum_fault_program() {
 }
 
 #[test]
+fn reference_core_runs_sv32_supervisor_sum_load_program() {
+    assert_sv32_supervisor_sum_load_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_sv32_supervisor_sum_load_program() {
+    assert_sv32_supervisor_sum_load_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_sv32_supervisor_mxr_load_program() {
+    assert_sv32_supervisor_mxr_load_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_sv32_supervisor_mxr_load_program() {
+    assert_sv32_supervisor_mxr_load_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_machine_mprv_supervisor_sum_load_program() {
+    assert_machine_mprv_supervisor_sum_load_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_machine_mprv_supervisor_sum_load_program() {
+    assert_machine_mprv_supervisor_sum_load_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_machine_mprv_supervisor_mxr_load_program() {
+    assert_machine_mprv_supervisor_mxr_load_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_machine_mprv_supervisor_mxr_load_program() {
+    assert_machine_mprv_supervisor_mxr_load_program(PipelineCore::new);
+}
+
+#[test]
 fn reference_core_runs_delegated_user_ecall_program() {
     assert_delegated_user_ecall_program(ReferenceCore::new);
 }
@@ -1714,4 +2071,24 @@ fn reference_core_runs_user_instret_counteren_trap_program() {
 #[test]
 fn pipeline_core_runs_user_instret_counteren_trap_program() {
     assert_user_instret_counteren_trap_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_user_cycleh_counteren_enabled_program() {
+    assert_user_cycleh_counteren_enabled_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_user_cycleh_counteren_enabled_program() {
+    assert_user_cycleh_counteren_enabled_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_user_instret_counteren_enabled_program() {
+    assert_user_instret_counteren_enabled_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_user_instret_counteren_enabled_program() {
+    assert_user_instret_counteren_enabled_program(PipelineCore::new);
 }

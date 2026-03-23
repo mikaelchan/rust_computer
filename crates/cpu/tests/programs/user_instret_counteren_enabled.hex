@@ -1,0 +1,17 @@
+# User-mode instret access with both mcounteren and scounteren enabled.
+# Host setup preloads:
+# - privilege = User
+# - mcounteren/scounteren allow instret reads
+# Program reads instret into x1, executes one addi, reads instret into x3,
+# then halts with wfi so retired-instruction accounting can be checked.
+# Expect x1 = 0, x2 = 7, x3 = 2, minstret = 4, instret = 4.
+0xc02020f3
+0x00700113
+0xc02021f3
+0x10500073
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013

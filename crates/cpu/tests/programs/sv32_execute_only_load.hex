@@ -1,0 +1,13 @@
+# Sv32 translated load from an execute-only page.
+# Host setup variants:
+# - Supervisor mode with translated fetch at virtual 0x4000 and sstatus.MXR set
+# - Machine mode with mstatus.MPRV, MPP=Supervisor, and MXR set
+# Program forms virtual address 0x8000, loads a word into x10, then spins.
+# Expect x10 = the mapped payload value.
+0x000080b7
+0x0000a503
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
