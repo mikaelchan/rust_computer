@@ -1202,6 +1202,183 @@ mod tests {
     }
 
     #[test]
+    fn selective_flush_can_target_one_virtual_address_within_one_asid() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x1000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x2000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x4000,
+            0x3000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x8000,
+            0x4000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        csrs.write(CsrAddress::Satp, sv32_satp_with_asid(0x2000, 1));
+        let asid1_first = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("asid 1 first translation should succeed");
+        let asid1_second = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x8123,
+                MemoryAccess::Load,
+            )
+            .expect("asid 1 second translation should succeed");
+
+        csrs.write(CsrAddress::Satp, sv32_satp_with_asid(0x5000, 2));
+        let asid2_first = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("asid 2 first translation should succeed");
+        let asid2_second = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x8123,
+                MemoryAccess::Load,
+            )
+            .expect("asid 2 second translation should succeed");
+
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x4000,
+            0x5000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x6000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x4000,
+            0x7000,
+            PTE_R | PTE_A | PTE_D,
+        );
+        install_sv32_mapping(
+            &mut bus,
+            0x5000,
+            0x6000,
+            0x8000,
+            0x8000,
+            PTE_R | PTE_A | PTE_D,
+        );
+
+        walker.flush_fence(TranslationFence::from_operands(Some(1), 0x4123, Some(2), 1));
+
+        csrs.write(CsrAddress::Satp, sv32_satp_with_asid(0x2000, 1));
+        let asid1_first_after_flush = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("matching VA in matching ASID should be reloaded");
+        let asid1_second_after_flush = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x8123,
+                MemoryAccess::Load,
+            )
+            .expect("other VA in matching ASID should stay cached");
+
+        csrs.write(CsrAddress::Satp, sv32_satp_with_asid(0x5000, 2));
+        let asid2_first_after_flush = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("matching VA in other ASID should stay cached");
+        let asid2_second_after_flush = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x8123,
+                MemoryAccess::Load,
+            )
+            .expect("other VA in other ASID should stay cached");
+
+        assert_eq!(asid1_first, TranslationResult::PhysicalAddress(0x1123));
+        assert_eq!(asid1_second, TranslationResult::PhysicalAddress(0x2123));
+        assert_eq!(asid2_first, TranslationResult::PhysicalAddress(0x3123));
+        assert_eq!(asid2_second, TranslationResult::PhysicalAddress(0x4123));
+        assert_eq!(
+            asid1_first_after_flush,
+            TranslationResult::PhysicalAddress(0x5123)
+        );
+        assert_eq!(
+            asid1_second_after_flush,
+            TranslationResult::PhysicalAddress(0x2123)
+        );
+        assert_eq!(
+            asid2_first_after_flush,
+            TranslationResult::PhysicalAddress(0x3123)
+        );
+        assert_eq!(
+            asid2_second_after_flush,
+            TranslationResult::PhysicalAddress(0x4123)
+        );
+        assert_eq!(bus.load32_count, 10);
+    }
+
+    #[test]
     fn load_translation_sets_accessed_bit() {
         let mut bus = CountingBus::new(0x10_000);
         let mut walker = PageWalker::default();
@@ -1288,6 +1465,60 @@ mod tests {
                 MemoryAccess::Load,
             )
             .expect("global tlb entry should survive ASID flush");
+
+        walker.flush();
+
+        let third = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("global flush should force a rewalk");
+
+        assert_eq!(first, TranslationResult::PhysicalAddress(0x1123));
+        assert_eq!(second, TranslationResult::PhysicalAddress(0x1123));
+        assert_eq!(third, TranslationResult::PhysicalAddress(0x3123));
+        assert_eq!(bus.load32_count, 4);
+    }
+
+    #[test]
+    fn nonleaf_global_mapping_survives_asid_flush_and_hits_across_address_spaces() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+
+        let vpn1 = vpn(0x4000, 1);
+        bus.store_word(0x2000 + (vpn1 * 4), sv32_nonleaf_with_flags(0x3000, PTE_G));
+        bus.store_word(0x5000 + (vpn1 * 4), sv32_nonleaf_with_flags(0x3000, PTE_G));
+        bus.store_word(0x3010, sv32_leaf(0x1000, PTE_R | PTE_A | PTE_D | PTE_V));
+
+        csrs.write(CsrAddress::Satp, sv32_satp_with_asid(0x2000, 1));
+        let first = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("non-leaf global mapping should translate");
+
+        bus.store_word(0x3010, sv32_leaf(0x3000, PTE_R | PTE_A | PTE_D | PTE_V));
+        walker.flush_fence(TranslationFence::from_operands(Some(0), 0, Some(2), 1));
+
+        csrs.write(CsrAddress::Satp, sv32_satp_with_asid(0x5000, 2));
+        let second = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("ASID-specific flush should preserve inherited global entry");
 
         walker.flush();
 

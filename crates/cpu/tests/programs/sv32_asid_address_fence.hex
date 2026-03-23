@@ -1,0 +1,35 @@
+# Sv32 combined virtual-address plus ASID selective-fence smoke test.
+# Host setup preloads:
+# - x1 = translated virtual address shared by both address spaces
+# - x2 = satp for ASID 1 mapping to value A
+# - x3 = satp for ASID 2 mapping to value B
+# - x4 = target ASID for the selective sfence.vma
+# - x5 = physical leaf-PTE address for the ASID 1 mapping
+# - x6 = replacement leaf PTE mapping ASID 1 to value C
+# - x7 = physical leaf-PTE address for the ASID 2 mapping
+# - x8 = replacement leaf PTE mapping ASID 2 to value D
+# - x9 = mstatus with MPRV and MPP=Supervisor
+# - x14 = mstatus with only MPP=Supervisor
+# Expect x10 = A, x11 = B, x12 = C after `sfence.vma x1, x4`, x13 = stale B in ASID 2,
+# and x15 = D only after a full `sfence.vma`.
+# Trailing nops leave safe speculative fetch space for the pipeline core.
+0x18011073
+0x0000a503
+0x18019073
+0x0000a583
+0x30071073
+0x0062a023
+0x0083a023
+0x30049073
+0x18011073
+0x12408073
+0x0000a603
+0x18019073
+0x0000a683
+0x12000073
+0x0000a783
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013

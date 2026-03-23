@@ -96,6 +96,7 @@ const SV32_ASID_SWITCH_PROGRAM: &str = include_str!("programs/sv32_asid_switch.h
 const SV32_SFENCE_REMAP_PROGRAM: &str = include_str!("programs/sv32_sfence_remap.hex");
 const SV32_SUPERPAGE_PROGRAM: &str = include_str!("programs/sv32_superpage.hex");
 const SV32_GLOBAL_ASID_FENCE_PROGRAM: &str = include_str!("programs/sv32_global_asid_fence.hex");
+const SV32_ASID_ADDRESS_FENCE_PROGRAM: &str = include_str!("programs/sv32_asid_address_fence.hex");
 const SV32_SUM_FAULT_PROGRAM: &str = include_str!("programs/sv32_sum_fault.hex");
 const DELEGATED_USER_ECALL_PROGRAM: &str = include_str!("programs/delegated_user_ecall.hex");
 const MACHINE_ECALL_RETURN_PROGRAM: &str = include_str!("programs/machine_ecall_return.hex");
@@ -1084,6 +1085,42 @@ where
             .load32(VM_LEAF_TABLE_1 + (((VM_VIRTUAL_ADDR >> 12) & 0x3ff) as u64) * 4)
             .expect("global leaf pte should remain readable"),
         sv32_leaf_pte(VM_PHYS_PAGE_B as u32, PTE_R | PTE_W | PTE_A | PTE_D)
+    );
+}
+
+fn assert_sv32_asid_address_fence_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SV32_ASID_ADDRESS_FENCE_PROGRAM,
+        VM_RAM_BYTES,
+        setup_sv32_asid_address_fence_state,
+    );
+
+    step_until(&mut machine, 96, |machine| {
+        machine.cpu().hart_state().registers.read(15) == VM_VALUE_D
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), VM_VALUE_A);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), VM_VALUE_B);
+    assert_eq!(machine.cpu().hart_state().registers.read(12), VM_VALUE_C);
+    assert_eq!(machine.cpu().hart_state().registers.read(13), VM_VALUE_B);
+    assert_eq!(machine.cpu().hart_state().registers.read(15), VM_VALUE_D);
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(sv32_leaf_pte_addr(VM_LEAF_TABLE_1, VM_VIRTUAL_ADDR))
+            .expect("asid 1 leaf pte should remain readable"),
+        sv32_leaf_pte(VM_PHYS_PAGE_C as u32, PTE_R | PTE_W | PTE_A | PTE_D)
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(sv32_leaf_pte_addr(VM_LEAF_TABLE_2, VM_VIRTUAL_ADDR))
+            .expect("asid 2 leaf pte should remain readable"),
+        sv32_leaf_pte(VM_PHYS_PAGE_D as u32, PTE_R | PTE_W | PTE_A | PTE_D)
     );
 }
 
@@ -2646,6 +2683,79 @@ where
         .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
 }
 
+fn setup_sv32_asid_address_fence_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    write_word(machine, VM_PHYS_PAGE_A, VM_VALUE_A);
+    write_word(machine, VM_PHYS_PAGE_B, VM_VALUE_B);
+    write_word(machine, VM_PHYS_PAGE_C, VM_VALUE_C);
+    write_word(machine, VM_PHYS_PAGE_D, VM_VALUE_D);
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_VIRTUAL_ADDR,
+        VM_PHYS_PAGE_A as u32,
+        PTE_R | PTE_W | PTE_A | PTE_D,
+    );
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_2,
+        VM_LEAF_TABLE_2,
+        VM_VIRTUAL_ADDR,
+        VM_PHYS_PAGE_B as u32,
+        PTE_R | PTE_W | PTE_A | PTE_D,
+    );
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(1, VM_VIRTUAL_ADDR);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(2, sv32_satp_with_asid(VM_ROOT_TABLE_1, 1));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(3, sv32_satp_with_asid(VM_ROOT_TABLE_2, 2));
+    machine.cpu_mut().hart_state_mut().registers.write(4, 1);
+    machine.cpu_mut().hart_state_mut().registers.write(
+        5,
+        sv32_leaf_pte_addr(VM_LEAF_TABLE_1, VM_VIRTUAL_ADDR) as u32,
+    );
+    machine.cpu_mut().hart_state_mut().registers.write(
+        6,
+        sv32_leaf_pte(VM_PHYS_PAGE_C as u32, PTE_R | PTE_W | PTE_A | PTE_D),
+    );
+    machine.cpu_mut().hart_state_mut().registers.write(
+        7,
+        sv32_leaf_pte_addr(VM_LEAF_TABLE_2, VM_VIRTUAL_ADDR) as u32,
+    );
+    machine.cpu_mut().hart_state_mut().registers.write(
+        8,
+        sv32_leaf_pte(VM_PHYS_PAGE_D as u32, PTE_R | PTE_W | PTE_A | PTE_D),
+    );
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(9, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(14, 1 << MSTATUS_MPP_SHIFT);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+}
+
 fn setup_sv32_sum_fault_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -3474,6 +3584,16 @@ fn reference_core_runs_sv32_global_asid_fence_program() {
 #[test]
 fn pipeline_core_runs_sv32_global_asid_fence_program() {
     assert_sv32_global_asid_fence_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_sv32_asid_address_fence_program() {
+    assert_sv32_asid_address_fence_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_sv32_asid_address_fence_program() {
+    assert_sv32_asid_address_fence_program(PipelineCore::new);
 }
 
 #[test]

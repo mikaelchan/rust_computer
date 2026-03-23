@@ -60,6 +60,7 @@ Current checked-in examples now cover:
 - user machine-CSR access trapped by machine mode with `mret` return
 - user `instret` access trapped by missing `scounteren` with `mret` return
 - `Sv32` ASID namespace switching
+- `Sv32` combined virtual-address plus ASID selective `sfence.vma`
 - pagetable remap visibility across `sfence.vma`
 - `Sv32` root-leaf superpage data access
 - `Sv32` global-mapping survival across ASID-specific `sfence.vma`
