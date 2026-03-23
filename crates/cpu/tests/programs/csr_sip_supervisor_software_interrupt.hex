@@ -1,0 +1,23 @@
+# Delegated supervisor software interrupt raised through a CSR write to sip.
+# Host setup preloads:
+# - privilege = Supervisor
+# - mideleg/sie enable supervisor software interrupts
+# - sstatus.SIE enabled
+# - stvec = 0x20
+# Mainline sets sip.SSIP, the handler clears it, records x10 = 6, and returns.
+# The addi at PC 0x4 must execute after the interrupt unwinds.
+# Expect x1 = 1, x10 = 6, scause = interrupt 1, sepc = 0x4, pc = 0x8.
+0x14415073
+0x00100093
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x14405073
+0x00600513
+0x10200073
+0x00000013
+0x00000013
+0x00000013

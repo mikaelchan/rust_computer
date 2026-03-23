@@ -1,0 +1,21 @@
+# Machine software interrupt raised through a CSR write to mip.
+# Host setup preloads:
+# - mstatus.MIE and mie.MSIE enabled
+# - mtvec = 0x20
+# Mainline sets mip.MSIP, the handler clears it, records x10 = 9, and returns.
+# The addi at PC 0x4 must execute after the interrupt unwinds.
+# Expect x1 = 1, x10 = 9, mcause = interrupt 3, mepc = 0x4, pc = 0x8.
+0x34445073
+0x00100093
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x34405073
+0x00900513
+0x30200073
+0x00000013
+0x00000013
+0x00000013

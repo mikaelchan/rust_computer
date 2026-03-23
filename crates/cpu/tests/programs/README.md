@@ -22,6 +22,9 @@ Current checked-in examples now cover:
 - simple load/store behavior
 - simple counted control flow
 - machine software interrupt delivery
+- machine software interrupt delivery raised by a `mip` CSR write
+- delegated supervisor software interrupt delivery raised by a `sip` CSR write
+- machine timer interrupt delivery from the memory-mapped timer device
 - user `cycleh` access with enabled counter delegation
 - user `instret` access with enabled counter delegation
 - `Sv32` translated loads from user-accessible pages

@@ -2,8 +2,8 @@ use std::{cell::RefCell, rc::Rc};
 
 use rvsim_cpu::{CpuError, CpuModel, PipelineCore, PrivilegeMode, ReferenceCore};
 use rvsim_devices::{
-    BlockDevice, DmaController, InterruptController, MachineSoftwareInterrupt, Ram, Rom,
-    SupervisorSoftwareInterrupt,
+    BlockDevice, DmaController, InterruptController, MachineSoftwareInterrupt, MachineTimer, Ram,
+    Rom, SupervisorSoftwareInterrupt,
 };
 use rvsim_isa::CsrAddress;
 use rvsim_system::{ArbiterBus, Bus, Machine, MemoryMap, Processor};
@@ -12,6 +12,7 @@ const RESET_VECTOR: u32 = 0;
 const RAM_BASE: u64 = 0x1000_0000;
 const RAM_BYTES: usize = 0x1000;
 const VM_RAM_BYTES: usize = 0x8000;
+const TIMER_BASE: u64 = 0x3000_0000;
 const CONTROLLER_BASE: u64 = 0x4000_0000;
 const MSIP_BASE: u64 = 0x5000_0000;
 const SSIP_BASE: u64 = 0x6000_0000;
@@ -54,6 +55,11 @@ const VM_SUPERPAGE_STORE_VALUE: u32 = 0x5555_6666;
 const STORE_LOAD_PROGRAM: &str = include_str!("programs/store_load.hex");
 const COUNT_LOOP_PROGRAM: &str = include_str!("programs/count_loop.hex");
 const MSIP_INTERRUPT_PROGRAM: &str = include_str!("programs/msip_interrupt.hex");
+const CSR_MIP_MACHINE_SOFTWARE_INTERRUPT_PROGRAM: &str =
+    include_str!("programs/csr_mip_machine_software_interrupt.hex");
+const CSR_SIP_SUPERVISOR_SOFTWARE_INTERRUPT_PROGRAM: &str =
+    include_str!("programs/csr_sip_supervisor_software_interrupt.hex");
+const MACHINE_TIMER_INTERRUPT_PROGRAM: &str = include_str!("programs/machine_timer_interrupt.hex");
 const SV32_ASID_SWITCH_PROGRAM: &str = include_str!("programs/sv32_asid_switch.hex");
 const SV32_SFENCE_REMAP_PROGRAM: &str = include_str!("programs/sv32_sfence_remap.hex");
 const SV32_SUPERPAGE_PROGRAM: &str = include_str!("programs/sv32_superpage.hex");
@@ -259,6 +265,110 @@ where
     assert_eq!(
         machine.cpu().hart_state().csrs.read(CsrAddress::Mcause),
         0x8000_0003
+    );
+}
+
+fn assert_csr_mip_machine_software_interrupt_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        CSR_MIP_MACHINE_SOFTWARE_INTERRUPT_PROGRAM,
+        RAM_BYTES,
+        setup_csr_mip_machine_software_interrupt_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 1
+            && machine.cpu().hart_state().registers.read(10) == 9
+            && machine.cpu().hart_state().pc == 0x8
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 9);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mepc), 0x4);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mcause),
+        0x8000_0003
+    );
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mip) & (1 << 3),
+        0
+    );
+}
+
+fn assert_csr_sip_supervisor_software_interrupt_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        CSR_SIP_SUPERVISOR_SOFTWARE_INTERRUPT_PROGRAM,
+        RAM_BYTES,
+        setup_csr_sip_supervisor_software_interrupt_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 1
+            && machine.cpu().hart_state().registers.read(10) == 6
+            && machine.cpu().hart_state().pc == 0x8
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 6);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Sepc), 0x4);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Scause),
+        0x8000_0001
+    );
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Sip) & (1 << 1),
+        0
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Supervisor
+    ));
+}
+
+fn assert_machine_timer_interrupt_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with_map(
+        make_cpu(RESET_VECTOR),
+        MACHINE_TIMER_INTERRUPT_PROGRAM,
+        RAM_BYTES,
+        install_machine_timer_device,
+        setup_machine_timer_interrupt_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().registers.read(10) == 1 && machine.cpu().hart_state().pc == 0x0
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x0);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mcause),
+        0x8000_0007
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(TIMER_BASE + 8)
+            .expect("mtimecmp low should remain readable"),
+        32
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(TIMER_BASE + 12)
+            .expect("mtimecmp high should remain readable"),
+        0
     );
 }
 
@@ -1121,6 +1231,89 @@ where
         .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
 }
 
+fn setup_csr_mip_machine_software_interrupt_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, 1 << 3);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mie, 1 << 3);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20);
+}
+
+fn setup_csr_sip_supervisor_software_interrupt_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mideleg, 1 << 1);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Sie, 1 << 1);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Sstatus, 1 << 1);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Stvec, 0x20);
+}
+
+fn install_machine_timer_device(memory: &mut MemoryMap) {
+    memory
+        .map_device(MachineTimer::new(TIMER_BASE))
+        .expect("machine timer should map");
+}
+
+fn setup_machine_timer_interrupt_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine
+        .bus_mut()
+        .store32(TIMER_BASE + 8, 1)
+        .expect("mtimecmp low should write during setup");
+    machine
+        .bus_mut()
+        .store32(TIMER_BASE + 12, 0)
+        .expect("mtimecmp high should write during setup");
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, 1 << 3);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mie, 1 << 7);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20);
+}
+
 fn setup_sv32_sfence_remap_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -1851,6 +2044,36 @@ fn reference_core_runs_msip_interrupt_program() {
 #[test]
 fn pipeline_core_runs_msip_interrupt_program() {
     assert_msip_interrupt_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_csr_mip_machine_software_interrupt_program() {
+    assert_csr_mip_machine_software_interrupt_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_csr_mip_machine_software_interrupt_program() {
+    assert_csr_mip_machine_software_interrupt_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_csr_sip_supervisor_software_interrupt_program() {
+    assert_csr_sip_supervisor_software_interrupt_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_csr_sip_supervisor_software_interrupt_program() {
+    assert_csr_sip_supervisor_software_interrupt_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_machine_timer_interrupt_program() {
+    assert_machine_timer_interrupt_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_machine_timer_interrupt_program() {
+    assert_machine_timer_interrupt_program(PipelineCore::new);
 }
 
 #[test]
