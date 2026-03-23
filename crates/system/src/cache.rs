@@ -1601,6 +1601,10 @@ where
         self.advance_active_burst();
     }
 
+    fn machine_time(&self) -> Option<u64> {
+        self.inner.machine_time()
+    }
+
     fn is_busy(&self) -> bool {
         self.maintenance.is_some()
             || self.active_burst.is_some()
@@ -1878,6 +1882,10 @@ where
 
     fn tick(&mut self) {
         self.inner.tick();
+    }
+
+    fn machine_time(&self) -> Option<u64> {
+        self.inner.machine_time()
     }
 
     fn is_busy(&self) -> bool {

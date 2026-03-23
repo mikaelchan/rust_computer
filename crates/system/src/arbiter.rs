@@ -406,6 +406,10 @@ where
         }
     }
 
+    fn machine_time(&self) -> Option<u64> {
+        self.inner.machine_time()
+    }
+
     fn is_busy(&self) -> bool {
         self.cpu_reserved_this_cycle
             || self.pending_request.is_some()

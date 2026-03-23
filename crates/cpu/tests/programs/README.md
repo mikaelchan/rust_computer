@@ -43,6 +43,7 @@ Current checked-in examples now cover:
 - `satp` ASID-namespace reuse that keeps a stale translation until `sfence.vma`
 - machine-mode writes and reads of the high-half `mcycleh` CSR
 - user `cycleh` access with enabled counter delegation
+- user `timeh` access sourced from the machine timer with enabled counter delegation
 - user `instret` access with enabled counter delegation
 - illegal writes to the read-only `instret` shadow CSR
 - `Sv32` translated loads from user-accessible pages

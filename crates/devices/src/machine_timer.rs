@@ -23,6 +23,11 @@ impl MachineTimer {
         }
     }
 
+    #[must_use]
+    pub const fn mtime(&self) -> u64 {
+        self.mtime
+    }
+
     fn offset(&self, addr: Address) -> Result<Address, BusError> {
         if !self.range.contains(addr) {
             return Err(BusError::UnmappedAddress { addr });
@@ -90,6 +95,10 @@ impl Addressable for MachineTimer {
         self.mtime = self.mtime.wrapping_add(1);
     }
 
+    fn machine_time(&self) -> Option<u64> {
+        Some(self.mtime)
+    }
+
     fn pending_interrupts(&self) -> InterruptSet {
         if self.mtime >= self.mtimecmp {
             InterruptSet::from(InterruptLine::MachineTimer)
@@ -155,6 +164,23 @@ mod tests {
         assert_eq!(read_u32(&mut timer, TIMER_BASE + 8), u32::MAX);
         assert_eq!(read_u32(&mut timer, TIMER_BASE + 12), u32::MAX);
         assert_eq!(timer.pending_interrupt(), None);
+    }
+
+    #[test]
+    fn exposes_current_mtime_as_machine_time_source() {
+        let mut timer = MachineTimer::new(TIMER_BASE);
+
+        assert_eq!(timer.machine_time(), Some(0));
+
+        write_u32(&mut timer, TIMER_BASE, 0x1234_5678);
+        write_u32(&mut timer, TIMER_BASE + 4, 1);
+
+        assert_eq!(timer.machine_time(), Some(0x0000_0001_1234_5678));
+
+        timer.tick();
+
+        assert_eq!(timer.machine_time(), Some(0x0000_0001_1234_5679));
+        assert_eq!(timer.mtime(), 0x0000_0001_1234_5679);
     }
 
     fn read_u32(timer: &mut MachineTimer, addr: u64) -> u32 {

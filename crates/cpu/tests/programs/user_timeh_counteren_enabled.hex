@@ -1,0 +1,13 @@
+# User-mode timeh access with both mcounteren and scounteren enabled.
+# Host setup preloads:
+# - privilege = User
+# - a machine timer device is mapped and its mtime high half is preset to 1
+# - mcounteren/scounteren allow time reads
+# Program reads timeh into x1, then spins at PC 0x4.
+# Expect x1 = 1 and timeh = 1.
+0xc81020f3
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013

@@ -126,6 +126,8 @@ const USER_INSTRET_COUNTEREN_TRAP_PROGRAM: &str =
     include_str!("programs/user_instret_counteren_trap.hex");
 const USER_CYCLEH_COUNTEREN_ENABLED_PROGRAM: &str =
     include_str!("programs/user_cycleh_counteren_enabled.hex");
+const USER_TIMEH_COUNTEREN_ENABLED_PROGRAM: &str =
+    include_str!("programs/user_timeh_counteren_enabled.hex");
 const USER_INSTRET_COUNTEREN_ENABLED_PROGRAM: &str =
     include_str!("programs/user_instret_counteren_enabled.hex");
 const SV32_USER_PAGE_LOAD_PROGRAM: &str = include_str!("programs/sv32_user_page_load.hex");
@@ -1838,6 +1840,38 @@ where
     ));
 }
 
+fn assert_user_timeh_counteren_enabled_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with_map(
+        make_cpu(RESET_VECTOR),
+        USER_TIMEH_COUNTEREN_ENABLED_PROGRAM,
+        RAM_BYTES,
+        install_machine_timer_device,
+        setup_user_timeh_counteren_enabled_state,
+    );
+
+    step_until(&mut machine, 24, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 1 && machine.cpu().hart_state().pc == 0x4
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x4);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Timeh), 1);
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(TIMER_BASE + 4)
+            .expect("mtime high should remain readable"),
+        1
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::User
+    ));
+}
+
 fn assert_machine_mcycleh_access_program<P>(make_cpu: fn(u32) -> P)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -3289,6 +3323,27 @@ where
         .write(CsrAddress::Mcycleh, 1);
 }
 
+fn setup_user_timeh_counteren_enabled_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::User;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mcounteren, 1 << 1);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Scounteren, 1 << 1);
+    machine
+        .bus_mut()
+        .store32(TIMER_BASE + 4, 1)
+        .expect("mtime high should write during setup");
+}
+
 fn setup_instret_shadow_write_trap_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -3852,6 +3907,16 @@ fn reference_core_runs_user_cycleh_counteren_enabled_program() {
 #[test]
 fn pipeline_core_runs_user_cycleh_counteren_enabled_program() {
     assert_user_cycleh_counteren_enabled_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_user_timeh_counteren_enabled_program() {
+    assert_user_timeh_counteren_enabled_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_user_timeh_counteren_enabled_program() {
+    assert_user_timeh_counteren_enabled_program(PipelineCore::new);
 }
 
 #[test]

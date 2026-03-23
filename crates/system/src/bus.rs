@@ -359,6 +359,9 @@ pub trait Addressable {
 
     fn reset(&mut self) {}
     fn tick(&mut self) {}
+    fn machine_time(&self) -> Option<u64> {
+        None
+    }
     fn access_latency(&self, _addr: Address, _kind: AccessKind, _width: usize) -> u32 {
         0
     }
@@ -379,6 +382,9 @@ pub trait Bus {
     fn store8(&mut self, addr: Address, value: u8) -> Result<(), BusError>;
     fn reset(&mut self) {}
     fn tick(&mut self) {}
+    fn machine_time(&self) -> Option<u64> {
+        None
+    }
     fn is_busy(&self) -> bool {
         false
     }

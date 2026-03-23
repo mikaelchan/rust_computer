@@ -205,6 +205,10 @@ impl CsrFile {
         self.machine.time = self.machine.time.wrapping_add(1);
     }
 
+    pub fn set_time(&mut self, time: u64) {
+        self.machine.time = time;
+    }
+
     pub fn increment_instret(&mut self, retired: u64) {
         self.machine.minstret = self.machine.minstret.wrapping_add(retired);
     }

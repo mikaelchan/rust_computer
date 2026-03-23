@@ -70,6 +70,10 @@ where
         self.inner.borrow_mut().tick();
     }
 
+    fn machine_time(&self) -> Option<u64> {
+        self.inner.borrow().machine_time()
+    }
+
     fn access_latency(&self, addr: Address, kind: AccessKind, width: usize) -> u32 {
         self.inner.borrow().access_latency(addr, kind, width)
     }
@@ -683,6 +687,12 @@ impl Bus for MemoryMap {
         }
     }
 
+    fn machine_time(&self) -> Option<u64> {
+        self.devices
+            .iter()
+            .find_map(|slot| slot.device.machine_time())
+    }
+
     fn is_busy(&self) -> bool {
         !self.active_transactions.is_empty() || !self.active_bursts.is_empty()
     }
@@ -780,6 +790,7 @@ mod tests {
         value: u8,
         interrupts: InterruptSet,
         latency_cycles: u32,
+        machine_time: Option<u64>,
     }
 
     impl Addressable for CounterDevice {
@@ -800,8 +811,18 @@ mod tests {
             Ok(())
         }
 
+        fn tick(&mut self) {
+            if let Some(machine_time) = &mut self.machine_time {
+                *machine_time = machine_time.wrapping_add(1);
+            }
+        }
+
         fn pending_interrupts(&self) -> InterruptSet {
             self.interrupts
+        }
+
+        fn machine_time(&self) -> Option<u64> {
+            self.machine_time
         }
 
         fn access_latency(&self, _addr: u64, _kind: AccessKind, _width: usize) -> u32 {
@@ -856,6 +877,7 @@ mod tests {
             value: 0,
             interrupts: InterruptSet::empty(),
             latency_cycles: 0,
+            machine_time: None,
         })
         .expect("device should map");
 
@@ -871,6 +893,7 @@ mod tests {
             value: 0,
             interrupts: InterruptSet::from(InterruptLine::MachineTimer),
             latency_cycles: 0,
+            machine_time: None,
         })
         .expect("timer-like device should map");
         map.map_device(CounterDevice {
@@ -878,6 +901,7 @@ mod tests {
             value: 0,
             interrupts: InterruptSet::from(InterruptLine::MachineExternal),
             latency_cycles: 0,
+            machine_time: None,
         })
         .expect("external device should map");
 
@@ -898,6 +922,7 @@ mod tests {
             value: 9,
             interrupts: InterruptSet::empty(),
             latency_cycles: 2,
+            machine_time: None,
         })
         .expect("device should map");
 
@@ -934,6 +959,7 @@ mod tests {
             value: 0x5a,
             interrupts: InterruptSet::empty(),
             latency_cycles: 2,
+            machine_time: None,
         })
         .expect("device should map");
 
@@ -1208,6 +1234,7 @@ mod tests {
             value: 1,
             interrupts: InterruptSet::from(InterruptLine::MachineExternal),
             latency_cycles: 0,
+            machine_time: None,
         }));
         let mut map = MemoryMap::new();
         map.map_shared_device(Rc::clone(&shared))
@@ -1221,5 +1248,25 @@ mod tests {
             map.pending_interrupts().highest_priority(),
             Some(InterruptLine::MachineExternal)
         );
+    }
+
+    #[test]
+    fn exposes_machine_time_from_mapped_devices() {
+        let mut map = MemoryMap::new();
+        map.map_device(CounterDevice {
+            range: AddressRange::new(0x4000, 4),
+            value: 0,
+            interrupts: InterruptSet::empty(),
+            latency_cycles: 0,
+            machine_time: Some(7),
+        })
+        .expect("time-source device should map");
+
+        assert_eq!(map.machine_time(), Some(7));
+
+        map.tick();
+        map.tick();
+
+        assert_eq!(map.machine_time(), Some(9));
     }
 }

@@ -35,6 +35,7 @@ That is why nested interrupt behavior should be tested here first. The cores dec
 ## Counter and CSR View Rules
 
 - Cycle, time, and retired-instruction counters are stored as independent 64-bit machine-owned values and exposed through low and high CSR halves.
+- `time/timeh` follow the bus-visible machine timer when one is present and otherwise fall back to the local per-cycle counter path used by simpler test buses.
 - `mcounteren` and `scounteren` gate visibility for lower privilege modes.
 - `sstatus`, `sie`, and `sip` are not independent storage blocks; they are masked supervisor views onto a larger machine-owned state model.
 
