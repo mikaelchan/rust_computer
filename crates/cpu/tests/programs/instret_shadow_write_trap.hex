@@ -1,0 +1,16 @@
+# Illegal write to the read-only instret shadow CSR.
+# Host setup preloads mtvec = 0x20.
+# The machine handler at 0x20 sets x10 = 1 and then spins.
+# Expect mcause = illegal instruction, mepc = 0, and mtval = the trapping CSR instruction.
+0xc02010f3
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00100513
+0x0000006f
+0x00000013
+0x00000013

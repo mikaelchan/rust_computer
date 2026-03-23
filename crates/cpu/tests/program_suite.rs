@@ -109,6 +109,9 @@ const SUPERVISOR_TVM_SFENCE_TRAP_PROGRAM: &str =
 const SUPERVISOR_TSR_SRET_TRAP_PROGRAM: &str =
     include_str!("programs/supervisor_tsr_sret_trap.hex");
 const SUPERVISOR_TW_WFI_TRAP_PROGRAM: &str = include_str!("programs/supervisor_tw_wfi_trap.hex");
+const MACHINE_MCYCLEH_ACCESS_PROGRAM: &str = include_str!("programs/machine_mcycleh_access.hex");
+const INSTRET_SHADOW_WRITE_TRAP_PROGRAM: &str =
+    include_str!("programs/instret_shadow_write_trap.hex");
 const USER_MACHINE_CSR_TRAP_PROGRAM: &str = include_str!("programs/user_machine_csr_trap.hex");
 const USER_INSTRET_COUNTEREN_TRAP_PROGRAM: &str =
     include_str!("programs/user_instret_counteren_trap.hex");
@@ -1662,6 +1665,25 @@ where
     ));
 }
 
+fn assert_machine_mcycleh_access_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine(make_cpu(RESET_VECTOR), MACHINE_MCYCLEH_ACCESS_PROGRAM);
+
+    step_until(&mut machine, 24, |machine| {
+        machine.cpu().hart_state().registers.read(10) == 1 && machine.cpu().hart_state().pc == 0x8
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mcycleh), 1);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Machine
+    ));
+}
+
 fn assert_user_instret_counteren_enabled_program<P>(make_cpu: fn(u32) -> P)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -1689,6 +1711,38 @@ where
     assert!(matches!(
         machine.cpu().hart_state().privilege,
         PrivilegeMode::User
+    ));
+}
+
+fn assert_instret_shadow_write_trap_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    const INSTRET_SHADOW_WRITE_INSTRUCTION: u32 = 0xc020_10f3;
+
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        INSTRET_SHADOW_WRITE_TRAP_PROGRAM,
+        RAM_BYTES,
+        setup_instret_shadow_write_trap_state,
+    );
+
+    step_until(&mut machine, 24, |machine| {
+        machine.cpu().hart_state().registers.read(10) == 1 && machine.cpu().hart_state().pc == 0x24
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 0);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x24);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mcause), 2);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mepc), 0);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mtval),
+        INSTRET_SHADOW_WRITE_INSTRUCTION
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Machine
     ));
 }
 
@@ -2852,6 +2906,17 @@ where
         .write(CsrAddress::Mcycleh, 1);
 }
 
+fn setup_instret_shadow_write_trap_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20);
+}
+
 fn setup_user_instret_counteren_enabled_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -3344,6 +3409,16 @@ fn pipeline_core_runs_user_cycleh_counteren_enabled_program() {
 }
 
 #[test]
+fn reference_core_runs_machine_mcycleh_access_program() {
+    assert_machine_mcycleh_access_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_machine_mcycleh_access_program() {
+    assert_machine_mcycleh_access_program(PipelineCore::new);
+}
+
+#[test]
 fn reference_core_runs_user_instret_counteren_enabled_program() {
     assert_user_instret_counteren_enabled_program(ReferenceCore::new);
 }
@@ -3351,4 +3426,14 @@ fn reference_core_runs_user_instret_counteren_enabled_program() {
 #[test]
 fn pipeline_core_runs_user_instret_counteren_enabled_program() {
     assert_user_instret_counteren_enabled_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_instret_shadow_write_trap_program() {
+    assert_instret_shadow_write_trap_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_instret_shadow_write_trap_program() {
+    assert_instret_shadow_write_trap_program(PipelineCore::new);
 }

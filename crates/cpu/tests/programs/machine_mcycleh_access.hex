@@ -1,0 +1,10 @@
+# Machine-mode high-half cycle counter access.
+# Program writes 1 into mcycleh, reads it back into x10, then spins.
+# Expect x10 = 1 and mcycleh to remain readable as 1.
+0xb800d073
+0xb8002573
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
