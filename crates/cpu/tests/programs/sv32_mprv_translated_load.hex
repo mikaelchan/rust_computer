@@ -1,0 +1,13 @@
+# Machine-mode translated load under mstatus.MPRV.
+# Host setup preloads:
+# - satp = active Sv32 root
+# - mstatus = MPRV with MPP=Supervisor
+# Program forms virtual address 0x8000, loads a word into x10, then spins.
+# Expect x10 = the mapped payload value even though execution stays in machine mode.
+0x000080b7
+0x0000a503
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013

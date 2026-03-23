@@ -11,7 +11,7 @@ use rvsim_system::{ArbiterBus, Bus, Machine, MemoryMap, Processor};
 const RESET_VECTOR: u32 = 0;
 const RAM_BASE: u64 = 0x1000_0000;
 const RAM_BYTES: usize = 0x1000;
-const VM_RAM_BYTES: usize = 0x8000;
+const VM_RAM_BYTES: usize = 0x10000;
 const TIMER_BASE: u64 = 0x3000_0000;
 const CONTROLLER_BASE: u64 = 0x4000_0000;
 const MSIP_BASE: u64 = 0x5000_0000;
@@ -44,10 +44,15 @@ const VM_LEAF_TABLE_2: u64 = RAM_BASE + 0x3000;
 const VM_PHYS_PAGE_A: u64 = RAM_BASE + 0x4000;
 const VM_PHYS_PAGE_B: u64 = RAM_BASE + 0x5000;
 const VM_ROOT_TABLE_3: u64 = RAM_BASE + 0x6000;
+const VM_PHYS_PAGE_C: u64 = RAM_BASE + 0x7000;
+const VM_PHYS_PAGE_D: u64 = RAM_BASE + 0x8000;
 const VM_VIRTUAL_ADDR: u32 = 0x4000;
 const VM_TRANSLATED_LOAD_ADDR: u32 = 0x8000;
+const VM_TRANSLATED_LOAD_ADDR_2: u32 = 0x9000;
 const VM_VALUE_A: u32 = 0x1111_2222;
 const VM_VALUE_B: u32 = 0x3333_4444;
+const VM_VALUE_C: u32 = 0x7777_8888;
+const VM_VALUE_D: u32 = 0x9999_AAAA;
 const VM_SUPERPAGE_VIRTUAL_ADDR: u32 = 0x0040_5000;
 const VM_SUPERPAGE_PHYSICAL_ADDR: u64 = RAM_BASE + 0x5000;
 const VM_SUPERPAGE_STORE_VALUE: u32 = 0x5555_6666;
@@ -64,6 +69,12 @@ const MACHINE_EXTERNAL_INTERRUPT_PROGRAM: &str =
     include_str!("programs/machine_external_interrupt.hex");
 const MACHINE_INTERRUPT_PRIORITY_PROGRAM: &str =
     include_str!("programs/machine_interrupt_priority.hex");
+const SV32_AD_BITS_PROGRAM: &str = include_str!("programs/sv32_ad_bits.hex");
+const SV32_MPRV_TRANSLATED_LOAD_PROGRAM: &str =
+    include_str!("programs/sv32_mprv_translated_load.hex");
+const SV32_SELECTIVE_SFENCE_PROGRAM: &str = include_str!("programs/sv32_selective_sfence.hex");
+const SV32_INSTRUCTION_PAGE_FAULT_PROGRAM: &str =
+    include_str!("programs/sv32_instruction_page_fault.hex");
 const CSR_MIP_MACHINE_SOFTWARE_INTERRUPT_PROGRAM: &str =
     include_str!("programs/csr_mip_machine_software_interrupt.hex");
 const CSR_SIP_SUPERVISOR_SOFTWARE_INTERRUPT_PROGRAM: &str =
@@ -727,6 +738,142 @@ where
     assert!(matches!(
         machine.cpu().hart_state().privilege,
         PrivilegeMode::Supervisor
+    ));
+}
+
+fn assert_sv32_ad_bits_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SV32_AD_BITS_PROGRAM,
+        VM_RAM_BYTES,
+        setup_sv32_ad_bits_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().registers.read(10) == 9 && machine.cpu().hart_state().pc == 0xc
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 9);
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(VM_PHYS_PAGE_A)
+            .expect("translated store target should remain readable"),
+        9
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(sv32_leaf_pte_addr(VM_LEAF_TABLE_1, VM_TRANSLATED_LOAD_ADDR))
+            .expect("leaf pte should remain readable")
+            & (PTE_A | PTE_D),
+        PTE_A | PTE_D
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Machine
+    ));
+}
+
+fn assert_machine_mprv_translation_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SV32_MPRV_TRANSLATED_LOAD_PROGRAM,
+        VM_RAM_BYTES,
+        setup_machine_mprv_translation_state,
+    );
+
+    step_until(&mut machine, 24, |machine| {
+        machine.cpu().hart_state().registers.read(10) == VM_VALUE_A
+            && machine.cpu().hart_state().pc == 0x8
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), VM_VALUE_A);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Machine
+    ));
+}
+
+fn assert_sv32_selective_sfence_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SV32_SELECTIVE_SFENCE_PROGRAM,
+        VM_RAM_BYTES,
+        setup_sv32_selective_sfence_state,
+    );
+
+    step_until(&mut machine, 64, |machine| {
+        machine.cpu().hart_state().registers.read(13) == VM_VALUE_B
+            && machine.cpu().hart_state().pc == 0x28
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), VM_VALUE_A);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), VM_VALUE_B);
+    assert_eq!(machine.cpu().hart_state().registers.read(12), VM_VALUE_C);
+    assert_eq!(machine.cpu().hart_state().registers.read(13), VM_VALUE_B);
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(sv32_leaf_pte_addr(VM_LEAF_TABLE_1, VM_TRANSLATED_LOAD_ADDR))
+            .expect("first remapped leaf pte should remain readable"),
+        sv32_leaf_pte(VM_PHYS_PAGE_C as u32, PTE_R | PTE_A | PTE_D)
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(sv32_leaf_pte_addr(
+                VM_LEAF_TABLE_1,
+                VM_TRANSLATED_LOAD_ADDR_2
+            ))
+            .expect("second remapped leaf pte should remain readable"),
+        sv32_leaf_pte(VM_PHYS_PAGE_D as u32, PTE_R | PTE_A | PTE_D)
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Machine
+    ));
+}
+
+fn assert_sv32_instruction_page_fault_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(VM_VIRTUAL_ADDR),
+        SV32_INSTRUCTION_PAGE_FAULT_PROGRAM,
+        VM_RAM_BYTES,
+        setup_sv32_instruction_page_fault_state,
+    );
+
+    step_until(&mut machine, 8, |machine| {
+        machine.cpu().hart_state().registers.read(10) == 1 && machine.cpu().hart_state().pc == 0x84
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x84);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mcause), 12);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mepc),
+        VM_VIRTUAL_ADDR
+    );
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mtval),
+        VM_VIRTUAL_ADDR
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Machine
     ));
 }
 
@@ -1587,6 +1734,152 @@ where
         .hart_state_mut()
         .csrs
         .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+}
+
+fn setup_sv32_ad_bits_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_TRANSLATED_LOAD_ADDR,
+        VM_PHYS_PAGE_A as u32,
+        PTE_R | PTE_W,
+    );
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(1, VM_TRANSLATED_LOAD_ADDR);
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Machine;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Satp, sv32_satp_with_asid(VM_ROOT_TABLE_1, 1));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+}
+
+fn setup_machine_mprv_translation_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    write_word(machine, VM_PHYS_PAGE_A, VM_VALUE_A);
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_TRANSLATED_LOAD_ADDR,
+        VM_PHYS_PAGE_A as u32,
+        PTE_R | PTE_A | PTE_D,
+    );
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Machine;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Satp, sv32_satp_with_asid(VM_ROOT_TABLE_1, 1));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+}
+
+fn setup_sv32_selective_sfence_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    write_word(machine, VM_PHYS_PAGE_A, VM_VALUE_A);
+    write_word(machine, VM_PHYS_PAGE_B, VM_VALUE_B);
+    write_word(machine, VM_PHYS_PAGE_C, VM_VALUE_C);
+    write_word(machine, VM_PHYS_PAGE_D, VM_VALUE_D);
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_TRANSLATED_LOAD_ADDR,
+        VM_PHYS_PAGE_A as u32,
+        PTE_R | PTE_A | PTE_D,
+    );
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_TRANSLATED_LOAD_ADDR_2,
+        VM_PHYS_PAGE_B as u32,
+        PTE_R | PTE_A | PTE_D,
+    );
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(1, VM_TRANSLATED_LOAD_ADDR);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(2, VM_TRANSLATED_LOAD_ADDR_2);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(3, sv32_satp_with_asid(VM_ROOT_TABLE_1, 1));
+    machine.cpu_mut().hart_state_mut().registers.write(
+        4,
+        sv32_leaf_pte_addr(VM_LEAF_TABLE_1, VM_TRANSLATED_LOAD_ADDR) as u32,
+    );
+    machine.cpu_mut().hart_state_mut().registers.write(
+        5,
+        sv32_leaf_pte_addr(VM_LEAF_TABLE_1, VM_TRANSLATED_LOAD_ADDR_2) as u32,
+    );
+    machine.cpu_mut().hart_state_mut().registers.write(
+        6,
+        sv32_leaf_pte(VM_PHYS_PAGE_C as u32, PTE_R | PTE_A | PTE_D),
+    );
+    machine.cpu_mut().hart_state_mut().registers.write(
+        7,
+        sv32_leaf_pte(VM_PHYS_PAGE_D as u32, PTE_R | PTE_A | PTE_D),
+    );
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(8, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(9, 1 << MSTATUS_MPP_SHIFT);
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Machine;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+}
+
+fn setup_sv32_instruction_page_fault_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Satp, sv32_satp_with_asid(VM_ROOT_TABLE_1, 1));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x80);
 }
 
 fn setup_csr_mip_machine_software_interrupt_state<P>(machine: &mut Machine<P, MemoryMap>)
@@ -2628,6 +2921,10 @@ fn install_sv32_superpage_mapping<P>(
     );
 }
 
+const fn sv32_leaf_pte_addr(leaf_table: u64, virtual_address: u32) -> u64 {
+    leaf_table + (((virtual_address >> PAGE_SHIFT) & 0x3ff) as u64) * 4
+}
+
 const fn sv32_leaf_pte(physical_address: u32, flags: u32) -> u32 {
     PTE_V | flags | ((physical_address >> PAGE_SHIFT) << 10)
 }
@@ -2774,6 +3071,46 @@ fn reference_core_runs_supervisor_nested_interrupt_program() {
 #[test]
 fn pipeline_core_runs_supervisor_nested_interrupt_program() {
     assert_supervisor_nested_interrupt_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_sv32_ad_bits_program() {
+    assert_sv32_ad_bits_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_sv32_ad_bits_program() {
+    assert_sv32_ad_bits_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_machine_mprv_translation_program() {
+    assert_machine_mprv_translation_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_machine_mprv_translation_program() {
+    assert_machine_mprv_translation_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_sv32_selective_sfence_program() {
+    assert_sv32_selective_sfence_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_sv32_selective_sfence_program() {
+    assert_sv32_selective_sfence_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_sv32_instruction_page_fault_program() {
+    assert_sv32_instruction_page_fault_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_sv32_instruction_page_fault_program() {
+    assert_sv32_instruction_page_fault_program(PipelineCore::new);
 }
 
 #[test]

@@ -1,0 +1,27 @@
+# Sv32 selective sfence.vma smoke test.
+# Host setup preloads:
+# - x1 = translated virtual address A
+# - x2 = translated virtual address B
+# - x3 = satp for the active address space
+# - x4 = physical leaf-PTE address for virtual address A
+# - x5 = physical leaf-PTE address for virtual address B
+# - x6 = replacement PTE for virtual address A
+# - x7 = replacement PTE for virtual address B
+# - x8 = mstatus with MPRV and MPP=Supervisor
+# - x9 = mstatus with only MPP=Supervisor
+# Expect x10 = A, x11 = B, x12 = C, and x13 = B after fencing only address A.
+0x18019073
+0x0000a503
+0x00012583
+0x30049073
+0x00622023
+0x0072a023
+0x30041073
+0x12008073
+0x0000a603
+0x00012683
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013

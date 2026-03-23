@@ -33,6 +33,10 @@ Current checked-in examples now cover:
 - machine software interrupt preemption of a delegated supervisor external handler
 - same-mode machine interrupt nesting after software re-enables `mstatus.MIE`
 - same-mode supervisor interrupt nesting after software re-enables `sstatus.SIE`
+- `Sv32` data-page loads and stores that force hardware `A/D` bit updates
+- machine-mode translated loads through supervisor mappings under `mstatus.MPRV`
+- selective `sfence.vma` invalidation for one translated virtual address
+- machine trapping on an `Sv32` instruction page fault during fetch
 - user `cycleh` access with enabled counter delegation
 - user `instret` access with enabled counter delegation
 - `Sv32` translated loads from user-accessible pages

@@ -1,0 +1,15 @@
+# Sv32 data-page accessed/dirty bit update smoke test.
+# Host setup preloads:
+# - x1 = translated virtual address
+# - satp = active Sv32 root
+# - mstatus = MPRV with MPP=Supervisor
+# Program stores 9 through the translated address, reloads it into x10, then spins.
+# Expect x10 = 9 and the leaf PTE to gain both A and D bits.
+0x00900113
+0x0020a023
+0x0000a503
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
