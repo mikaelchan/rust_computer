@@ -1,0 +1,27 @@
+# Sv32 supervisor-permission fault smoke test.
+# Host setup preloads:
+# - satp for the address space
+# - mtvec = 0x20
+# - x1 = translated virtual address
+# - mstatus.MPRV with MPP=Supervisor and SUM cleared
+# The mapped page is user-accessible, so the translated load should fault.
+# Trap handler increments x10, records mcause in x11 and mtval in x12,
+# advances mepc past the faulting load, and returns so mainline code can continue.
+# Expect x10 = 1, x11 = 13, x12 = faulting virtual address, x13 = 1.
+# Trailing nops leave safe speculative fetch space for the pipeline core.
+0x0000a503
+0x00168693
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00150513
+0x342025f3
+0x34302673
+0x34102773
+0x00470713
+0x34171073
+0x30200073
+0x00000013

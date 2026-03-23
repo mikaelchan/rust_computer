@@ -1,4 +1,6 @@
-use rvsim_isa::{CsrAddress, DecodedInstruction, Exception, Trap, opcode::InstructionKind};
+use rvsim_isa::{
+    CsrAddress, DecodedInstruction, Exception, SystemKind, Trap, opcode::InstructionKind,
+};
 use rvsim_system::{Bus, CpuCycle, Processor, SimComponent};
 
 use crate::{
@@ -392,28 +394,8 @@ impl Processor for PipelineCore {
                                 detect_raw_hazard(producer.decoded.rd, decoded.rs1, decoded.rs2)
                             })
                             .unwrap_or_default();
-                        let csr_hazard = matches!(decoded.kind, InstructionKind::Csr(_))
-                            && (current
-                                .id_ex
-                                .payload
-                                .map(|payload| {
-                                    matches!(payload.decoded.kind, InstructionKind::Csr(_))
-                                })
-                                .unwrap_or(false)
-                                || current
-                                    .ex_mem
-                                    .payload
-                                    .map(|payload| {
-                                        matches!(payload.decoded.kind, InstructionKind::Csr(_))
-                                    })
-                                    .unwrap_or(false)
-                                || current
-                                    .mem_wb
-                                    .payload
-                                    .map(|payload| {
-                                        matches!(payload.decoded.kind, InstructionKind::Csr(_))
-                                    })
-                                    .unwrap_or(false));
+                        let csr_hazard = requires_csr_serialization(decoded)
+                            && has_in_flight_csr_instruction(current);
 
                         if load_use_hazard.stall || csr_hazard {
                             decode_stalled = true;
@@ -575,6 +557,31 @@ fn is_translation_barrier_payload(
         decoded.kind,
         InstructionKind::System(rvsim_isa::SystemKind::SfenceVma)
     ) || matches!(csr_write, Some(write) if write.address == CsrAddress::Satp)
+}
+
+fn requires_csr_serialization(decoded: DecodedInstruction) -> bool {
+    matches!(
+        decoded.kind,
+        InstructionKind::Csr(_) | InstructionKind::System(SystemKind::Mret | SystemKind::Sret)
+    )
+}
+
+fn has_in_flight_csr_instruction(current: PipelineLatches) -> bool {
+    current
+        .id_ex
+        .payload
+        .map(|payload| matches!(payload.decoded.kind, InstructionKind::Csr(_)))
+        .unwrap_or(false)
+        || current
+            .ex_mem
+            .payload
+            .map(|payload| matches!(payload.decoded.kind, InstructionKind::Csr(_)))
+            .unwrap_or(false)
+        || current
+            .mem_wb
+            .payload
+            .map(|payload| matches!(payload.decoded.kind, InstructionKind::Csr(_)))
+            .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1067,6 +1074,73 @@ mod tests {
             0x8000
         );
         assert_eq!(core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc), 4);
+        assert_eq!(core.stats().trap_count, 1);
+    }
+
+    #[test]
+    fn machine_mprv_sum_fault_handler_does_not_leak_faulting_load_writeback() {
+        let mut bus = TestBus::new(0x10_000);
+        bus.store_words(
+            0x0000,
+            &[
+                encode_lw(10, 1, 0),
+                encode_addi(13, 13, 1),
+                encode_jal(0, 0),
+                0,
+                0,
+                0,
+                0,
+                0,
+                encode_addi(10, 10, 1),
+                encode_csrrs(11, rvsim_isa::CsrAddress::Mcause as u16, 0),
+                encode_csrrs(12, rvsim_isa::CsrAddress::Mtval as u16, 0),
+                encode_csrrs(14, rvsim_isa::CsrAddress::Mepc as u16, 0),
+                encode_addi(14, 14, 4),
+                encode_csrrw(0, rvsim_isa::CsrAddress::Mepc as u16, 14),
+                encode_mret(),
+                encode_addi(0, 0, 0),
+            ],
+        );
+        bus.store_word(0x1000, 0x1111_2222);
+        install_sv32_mapping(
+            &mut bus,
+            0x2000,
+            0x3000,
+            0x8000,
+            0x1000,
+            PTE_R | PTE_U | PTE_A | PTE_D,
+        );
+
+        let mut core = PipelineCore::new(0x0000);
+        core.hart_state_mut().privilege = crate::state::PrivilegeMode::Machine;
+        core.hart_state_mut().registers.write(1, 0x8000);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Satp, SATP_MODE_SV32 | (0x2000 >> 12));
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+        core.hart_state_mut().csrs.write(
+            rvsim_isa::CsrAddress::Mstatus,
+            MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT),
+        );
+
+        let mut observed_csr_stall = false;
+        for _ in 0..32 {
+            core.step_cycle(&mut bus)
+                .expect("fault handler return path should execute through pipeline");
+            observed_csr_stall |= core.last_trace().note == "csr stall";
+            if core.hart_state().registers.read(13) == 1 && core.hart_state().pc == 0x8 {
+                break;
+            }
+        }
+
+        assert!(observed_csr_stall);
+        assert_eq!(core.hart_state().registers.read(10), 1);
+        assert_eq!(core.hart_state().registers.read(11), 13);
+        assert_eq!(core.hart_state().registers.read(12), 0x8000);
+        assert_eq!(core.hart_state().registers.read(13), 1);
+        assert_eq!(core.hart_state().pc, 0x8);
         assert_eq!(core.stats().trap_count, 1);
     }
 
