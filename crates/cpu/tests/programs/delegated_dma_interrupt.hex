@@ -1,0 +1,33 @@
+# Delegated supervisor external interrupt from DMA completion.
+# Host setup preloads:
+# - privilege = User
+# - mideleg/sie enable supervisor external interrupts
+# - stvec = 0x40
+# - RAM at 0x1000_0000 contains 0x11223344 and 0x55667788
+# Mainline programs the DMA source, destination, length, supervisor route,
+# and control start+IRQ-enable, then spins at PC 0x30.
+# The supervisor handler clears STATUS_DONE, writes x10 = 6, returns with sret,
+# and user mainline resumes at PC 0x30.
+# Expect x1 = 5, x10 = 6, scause = interrupt 9, sepc = 0x30, privilege = User.
+0x00500093
+0x70000137
+0x100001b7
+0x04018213
+0x00200293
+0x00100313
+0x00312023
+0x00412223
+0x00512423
+0x00612a23
+0x00900393
+0x00712623
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x70000137
+0x00400193
+0x00312623
+0x00600513
+0x10200073
+0x0000006f

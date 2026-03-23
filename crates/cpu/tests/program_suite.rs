@@ -1,10 +1,12 @@
+use std::{cell::RefCell, rc::Rc};
+
 use rvsim_cpu::{CpuError, CpuModel, PipelineCore, PrivilegeMode, ReferenceCore};
 use rvsim_devices::{
-    BlockDevice, InterruptController, MachineSoftwareInterrupt, Ram, Rom,
+    BlockDevice, DmaController, InterruptController, MachineSoftwareInterrupt, Ram, Rom,
     SupervisorSoftwareInterrupt,
 };
 use rvsim_isa::CsrAddress;
-use rvsim_system::{Bus, Machine, MemoryMap, Processor};
+use rvsim_system::{ArbiterBus, Bus, Machine, MemoryMap, Processor};
 
 const RESET_VECTOR: u32 = 0;
 const RAM_BASE: u64 = 0x1000_0000;
@@ -15,6 +17,8 @@ const MSIP_BASE: u64 = 0x5000_0000;
 const SSIP_BASE: u64 = 0x6000_0000;
 const BLOCK_BASE: u64 = 0x7000_0000;
 const BLOCK_BYTES: usize = 16;
+const DMA_BASE: u64 = 0x7000_0000;
+const DMA_DEST_ADDR: u64 = RAM_BASE + 0x40;
 const PAGE_SHIFT: u32 = 12;
 const SATP_MODE_SV32: u32 = 1 << 31;
 const MSTATUS_MPRV: u32 = 1 << 17;
@@ -56,6 +60,7 @@ const DELEGATED_EXTERNAL_INTERRUPT_PROGRAM: &str =
     include_str!("programs/delegated_external_interrupt.hex");
 const DELEGATED_BLOCK_INTERRUPT_PROGRAM: &str =
     include_str!("programs/delegated_block_interrupt.hex");
+const DELEGATED_DMA_INTERRUPT_PROGRAM: &str = include_str!("programs/delegated_dma_interrupt.hex");
 
 fn parse_program_image(source: &str) -> Vec<u32> {
     source
@@ -134,6 +139,25 @@ fn step_until<P, F>(machine: &mut Machine<P, MemoryMap>, max_cycles: usize, mut 
 where
     P: Processor<Error = CpuError> + CpuModel,
     F: FnMut(&Machine<P, MemoryMap>) -> bool,
+{
+    for _ in 0..max_cycles {
+        machine.step_cycle().expect("program step should succeed");
+        if predicate(machine) {
+            return;
+        }
+    }
+
+    panic!(
+        "program on {} did not reach its stop condition in {max_cycles} cycles",
+        machine.cpu().model_name()
+    );
+}
+
+fn step_until_with_bus<P, B, F>(machine: &mut Machine<P, B>, max_cycles: usize, mut predicate: F)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+    B: Bus,
+    F: FnMut(&Machine<P, B>) -> bool,
 {
     for _ in 0..max_cycles {
         machine.step_cycle().expect("program step should succeed");
@@ -535,6 +559,65 @@ where
     );
 }
 
+fn assert_delegated_dma_interrupt_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_dma_machine(
+        make_cpu(RESET_VECTOR),
+        DELEGATED_DMA_INTERRUPT_PROGRAM,
+        setup_delegated_dma_interrupt_state,
+    );
+
+    step_until_with_bus(&mut machine, 72, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 5
+            && machine.cpu().hart_state().registers.read(10) == 6
+            && machine.cpu().hart_state().pc == 0x30
+            && matches!(machine.cpu().hart_state().privilege, PrivilegeMode::User)
+            && machine
+                .bus()
+                .pending_interrupts()
+                .highest_priority()
+                .is_none()
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 5);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 6);
+    assert_eq!(machine.cpu().hart_state().pc, 0x30);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Scause),
+        0x8000_0009
+    );
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Sepc), 0x30);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::User
+    ));
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(DMA_BASE + DmaController::CONTROL_OFFSET)
+            .expect("dma control register should remain readable")
+            & DmaController::STATUS_DONE,
+        0
+    );
+    assert_eq!(machine.bus().pending_interrupts().highest_priority(), None);
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(DMA_DEST_ADDR)
+            .expect("copied word 0 should remain readable"),
+        0x1122_3344
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(DMA_DEST_ADDR + 4)
+            .expect("copied word 1 should remain readable"),
+        0x5566_7788
+    );
+}
+
 fn setup_sv32_asid_switch_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -889,6 +972,62 @@ where
         .write(CsrAddress::Stvec, 0x20);
 }
 
+fn build_dma_machine<P, F>(
+    cpu: P,
+    program_image: &str,
+    setup: F,
+) -> Machine<P, ArbiterBus<MemoryMap>>
+where
+    P: Processor<Error = CpuError> + CpuModel,
+    F: FnOnce(&mut Machine<P, ArbiterBus<MemoryMap>>),
+{
+    let words = parse_program_image(program_image);
+    let dma = Rc::new(RefCell::new(DmaController::new(DMA_BASE)));
+    let mut memory = MemoryMap::new();
+    memory
+        .map_device(Rom::from_words(RESET_VECTOR as u64, &words))
+        .expect("ROM should map");
+    memory
+        .map_device(Ram::new(RAM_BASE, RAM_BYTES))
+        .expect("RAM should map");
+    memory
+        .map_shared_device(Rc::clone(&dma))
+        .expect("DMA device should map");
+
+    let mut bus = ArbiterBus::new(memory);
+    bus.add_shared_master(Rc::clone(&dma));
+    bus.store32(RAM_BASE, 0x1122_3344)
+        .expect("DMA source word 0 should write during setup");
+    bus.store32(RAM_BASE + 4, 0x5566_7788)
+        .expect("DMA source word 1 should write during setup");
+
+    let mut machine = Machine::new(cpu, bus);
+    setup(&mut machine);
+    machine
+}
+
+fn setup_delegated_dma_interrupt_state<P>(machine: &mut Machine<P, ArbiterBus<MemoryMap>>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::User;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mideleg, 1 << 9);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Sie, 1 << 9);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Stvec, 0x40);
+}
+
 fn write_word<P>(machine: &mut Machine<P, MemoryMap>, addr: u64, value: u32)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -1077,4 +1216,14 @@ fn reference_core_runs_delegated_block_interrupt_program() {
 #[test]
 fn pipeline_core_runs_delegated_block_interrupt_program() {
     assert_delegated_block_interrupt_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_delegated_dma_interrupt_program() {
+    assert_delegated_dma_interrupt_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_delegated_dma_interrupt_program() {
+    assert_delegated_dma_interrupt_program(PipelineCore::new);
 }
