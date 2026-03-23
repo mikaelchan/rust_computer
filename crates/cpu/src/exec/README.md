@@ -35,11 +35,11 @@ This contract is what lets the same semantic function serve both the reference c
 ## Memory and Stall Semantics
 
 - Loads and stores first compute a virtual address, then ask the page walker for translation.
-- Translation can return a physical address, a stall, or a page fault.
+- Translation can return a physical address, a stall, or an architectural fault trap.
 - Even after translation succeeds, the backing bus can still return `Busy`, which again means "retry later without inventing new architectural state."
-- Memory-side faults are mapped into architectural traps rather than leaking raw bus errors upward, unless the error is outside the modeled architectural fault set.
+- Memory-side misaligned and physical-access failures are mapped into architectural traps rather than leaking raw bus errors upward.
 
-That split is important: the semantic layer knows how to convert a legal architectural failure into a trap, but transport-level failures that do not map to the ISA still remain real errors.
+That split is important: the semantic layer owns the ISA-visible fault contract, while the bus still owns retry timing and transport behavior.
 
 ## CSR Handling Model
 

@@ -1,7 +1,8 @@
-use rvsim_isa::{Exception, Trap};
+use rvsim_isa::Trap;
 use rvsim_system::{Bus, BusError};
 
 use crate::{
+    exec::map_bus_error_to_trap,
     mmu::{MemoryAccess, PageWalker, TranslationResult},
     pipeline::latches::IfIdPayload,
     predictor::{BranchPrediction, BranchPredictor},
@@ -32,17 +33,17 @@ where
         match walker.translate(bus, csrs, privilege, pc, MemoryAccess::Instruction)? {
             TranslationResult::PhysicalAddress(physical_address) => physical_address,
             TranslationResult::Stall => return Ok(FetchEvent::Stall),
-            TranslationResult::PageFault(trap) => return Ok(FetchEvent::Trap(trap)),
+            TranslationResult::Fault(trap) => return Ok(FetchEvent::Trap(trap)),
         };
     let raw = match bus.fetch32(u64::from(physical_address)) {
         Ok(raw) => raw,
         Err(BusError::Busy { .. }) => return Ok(FetchEvent::Stall),
-        Err(BusError::MisalignedAccess { .. }) => {
-            return Ok(FetchEvent::Trap(Trap::Exception(
-                Exception::InstructionAddressMisaligned { addr: pc },
-            )));
+        Err(error) => {
+            if let Some(trap) = map_bus_error_to_trap(&error, pc, MemoryAccess::Instruction) {
+                return Ok(FetchEvent::Trap(trap));
+            }
+            return Err(error);
         }
-        Err(error) => return Err(error),
     };
     let prediction = predict_from_raw(pc, raw, predictor);
     Ok(FetchEvent::Advance(IfIdPayload {

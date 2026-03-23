@@ -3,7 +3,7 @@ use rvsim_system::{Bus, BusError, CpuCycle, Processor, SimComponent};
 
 use crate::{
     core::{CpuError, CpuModel},
-    exec::{ExecutionResult, apply_trap, execute_decoded},
+    exec::{ExecutionResult, apply_trap, execute_decoded, map_bus_error_to_trap},
     mmu::{MemoryAccess, PageWalker, TranslationResult},
     state::HartState,
 };
@@ -116,7 +116,7 @@ impl Processor for ReferenceCore {
                         stalled: true,
                     });
                 }
-                TranslationResult::PageFault(trap) => {
+                TranslationResult::Fault(trap) => {
                     self.last_result = apply_trap(&mut self.state, trap, pc);
                     return Ok(CpuCycle {
                         retired_instructions: 0,
@@ -137,18 +137,17 @@ impl Processor for ReferenceCore {
                         stalled: true,
                     });
                 }
-                Err(BusError::MisalignedAccess { .. }) => {
-                    self.last_result = apply_trap(
-                        &mut self.state,
-                        Trap::Exception(Exception::InstructionAddressMisaligned { addr: pc }),
-                        pc,
-                    );
-                    return Ok(CpuCycle {
-                        retired_instructions: 0,
-                        stalled: true,
-                    });
+                Err(error) => {
+                    if let Some(trap) = map_bus_error_to_trap(&error, pc, MemoryAccess::Instruction)
+                    {
+                        self.last_result = apply_trap(&mut self.state, trap, pc);
+                        return Ok(CpuCycle {
+                            retired_instructions: 0,
+                            stalled: true,
+                        });
+                    }
+                    return Err(error.into());
                 }
-                Err(error) => return Err(error.into()),
             };
 
             match decode(raw, pc) {
@@ -240,11 +239,18 @@ mod tests {
 
     impl Bus for TinyBus {
         fn load8(&mut self, addr: u64) -> Result<u8, rvsim_system::BusError> {
-            Ok(self.bytes[addr as usize])
+            self.bytes
+                .get(addr as usize)
+                .copied()
+                .ok_or(rvsim_system::BusError::UnmappedAddress { addr })
         }
 
         fn store8(&mut self, addr: u64, value: u8) -> Result<(), rvsim_system::BusError> {
-            self.bytes[addr as usize] = value;
+            let slot = self
+                .bytes
+                .get_mut(addr as usize)
+                .ok_or(rvsim_system::BusError::UnmappedAddress { addr })?;
+            *slot = value;
             Ok(())
         }
 
@@ -1166,6 +1172,41 @@ mod tests {
         assert_eq!(
             core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
             0x4000
+        );
+    }
+
+    #[test]
+    fn traps_on_instruction_access_fault_during_fetch() {
+        let mut bus = TinyBus::new(128);
+        bus.store_words(0x0020, &[encode_addi(10, 0, 1), encode_jal(0, 0)]);
+
+        let mut core = ReferenceCore::new(0x1000);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        core.step_cycle(&mut bus)
+            .expect("instruction access fault should trap");
+        core.step_cycle(&mut bus)
+            .expect("machine handler should execute after access fault");
+
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().registers.read(10), 1);
+        assert_eq!(core.hart_state().pc, 0x24);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            1
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc),
+            0x1000
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            0x1000
         );
     }
 

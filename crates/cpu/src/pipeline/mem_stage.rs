@@ -1,8 +1,9 @@
-use rvsim_isa::{Exception, LoadKind, StoreKind, Trap, opcode::InstructionKind};
+use rvsim_isa::{LoadKind, StoreKind, Trap, opcode::InstructionKind};
 use rvsim_system::{Bus, BusError};
 
 use crate::{
     exec::load_store,
+    exec::map_bus_error_to_trap,
     mmu::{MemoryAccess, PageWalker, TranslationResult},
     pipeline::latches::{ExMemPayload, MemWbPayload},
     state::{CsrFile, PrivilegeMode},
@@ -36,7 +37,7 @@ pub fn access(
             )? {
                 TranslationResult::PhysicalAddress(physical_address) => physical_address,
                 TranslationResult::Stall => return Ok(MemoryEvent::Stall(payload)),
-                TranslationResult::PageFault(trap) => return Ok(MemoryEvent::Trap(trap)),
+                TranslationResult::Fault(trap) => return Ok(MemoryEvent::Trap(trap)),
             };
             match load_value(bus, load_kind, u64::from(physical_address)) {
                 Ok(value) => Ok(MemoryEvent::Advance(MemWbPayload {
@@ -47,12 +48,9 @@ pub fn access(
                     next_pc: payload.next_pc,
                 })),
                 Err(BusError::Busy { .. }) => Ok(MemoryEvent::Stall(payload)),
-                Err(BusError::MisalignedAccess { .. }) => Ok(MemoryEvent::Trap(Trap::Exception(
-                    Exception::LoadAddressMisaligned {
-                        addr: virtual_address,
-                    },
-                ))),
-                Err(error) => Err(error),
+                Err(error) => map_bus_error_to_trap(&error, virtual_address, MemoryAccess::Load)
+                    .map(MemoryEvent::Trap)
+                    .ok_or(error),
             }
         }
         InstructionKind::Store(store_kind) => {
@@ -66,7 +64,7 @@ pub fn access(
             )? {
                 TranslationResult::PhysicalAddress(physical_address) => physical_address,
                 TranslationResult::Stall => return Ok(MemoryEvent::Stall(payload)),
-                TranslationResult::PageFault(trap) => return Ok(MemoryEvent::Trap(trap)),
+                TranslationResult::Fault(trap) => return Ok(MemoryEvent::Trap(trap)),
             };
             match store_value(
                 bus,
@@ -82,12 +80,9 @@ pub fn access(
                     next_pc: payload.next_pc,
                 })),
                 Err(BusError::Busy { .. }) => Ok(MemoryEvent::Stall(payload)),
-                Err(BusError::MisalignedAccess { .. }) => Ok(MemoryEvent::Trap(Trap::Exception(
-                    Exception::StoreAddressMisaligned {
-                        addr: virtual_address,
-                    },
-                ))),
-                Err(error) => Err(error),
+                Err(error) => map_bus_error_to_trap(&error, virtual_address, MemoryAccess::Store)
+                    .map(MemoryEvent::Trap)
+                    .ok_or(error),
             }
         }
         _ => Ok(MemoryEvent::Advance(MemWbPayload {

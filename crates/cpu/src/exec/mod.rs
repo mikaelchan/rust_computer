@@ -89,7 +89,7 @@ pub fn execute_decoded(
                         memory_access: true,
                     });
                 }
-                TranslationResult::PageFault(trap) => {
+                TranslationResult::Fault(trap) => {
                     let mut result = apply_trap(state, trap, current_pc);
                     result.memory_access = true;
                     return Ok(result);
@@ -113,7 +113,9 @@ pub fn execute_decoded(
                             memory_access: true,
                         });
                     }
-                    if let Some(trap) = map_memory_error(error.clone(), virtual_address, true) {
+                    if let Some(trap) =
+                        map_bus_error_to_trap(&error, virtual_address, MemoryAccess::Load)
+                    {
                         let mut result = apply_trap(state, trap, current_pc);
                         result.memory_access = true;
                         return Ok(result);
@@ -139,7 +141,7 @@ pub fn execute_decoded(
                         memory_access: true,
                     });
                 }
-                TranslationResult::PageFault(trap) => {
+                TranslationResult::Fault(trap) => {
                     let mut result = apply_trap(state, trap, current_pc);
                     result.memory_access = true;
                     return Ok(result);
@@ -162,7 +164,9 @@ pub fn execute_decoded(
                             memory_access: true,
                         });
                     }
-                    if let Some(trap) = map_memory_error(error.clone(), virtual_address, false) {
+                    if let Some(trap) =
+                        map_bus_error_to_trap(&error, virtual_address, MemoryAccess::Store)
+                    {
                         let mut result = apply_trap(state, trap, current_pc);
                         result.memory_access = true;
                         return Ok(result);
@@ -354,6 +358,28 @@ const fn ecall_exception(privilege: PrivilegeMode) -> Exception {
     }
 }
 
+pub(crate) fn map_bus_error_to_trap(
+    error: &BusError,
+    address: u32,
+    access: MemoryAccess,
+) -> Option<Trap> {
+    match error {
+        BusError::Busy { .. } => None,
+        BusError::MisalignedAccess { .. } => Some(Trap::Exception(match access {
+            MemoryAccess::Instruction => Exception::InstructionAddressMisaligned { addr: address },
+            MemoryAccess::Load => Exception::LoadAddressMisaligned { addr: address },
+            MemoryAccess::Store => Exception::StoreAddressMisaligned { addr: address },
+        })),
+        BusError::UnmappedAddress { .. }
+        | BusError::ReadOnlyAddress { .. }
+        | BusError::DeviceFault { .. } => Some(Trap::Exception(match access {
+            MemoryAccess::Instruction => Exception::InstructionAccessFault { addr: address },
+            MemoryAccess::Load => Exception::LoadAccessFault { addr: address },
+            MemoryAccess::Store => Exception::StoreAccessFault { addr: address },
+        })),
+    }
+}
+
 fn write_rd(state: &mut HartState, rd: Option<u8>, value: u32) {
     if let Some(rd) = rd {
         state.registers.write(rd, value);
@@ -383,16 +409,45 @@ fn store_value(
     }
 }
 
-fn map_memory_error(error: BusError, address: u32, is_load: bool) -> Option<Trap> {
-    match error {
-        BusError::MisalignedAccess { .. } => Some(Trap::Exception(if is_load {
-            Exception::LoadAddressMisaligned { addr: address }
-        } else {
-            Exception::StoreAddressMisaligned { addr: address }
-        })),
-        BusError::Busy { .. } => None,
-        BusError::UnmappedAddress { .. }
-        | BusError::ReadOnlyAddress { .. }
-        | BusError::DeviceFault { .. } => None,
+#[cfg(test)]
+mod tests {
+    use super::map_bus_error_to_trap;
+    use crate::mmu::MemoryAccess;
+    use rvsim_isa::{Exception, Trap};
+    use rvsim_system::BusError;
+
+    #[test]
+    fn unmapped_and_device_fault_bus_errors_become_access_faults() {
+        assert_eq!(
+            map_bus_error_to_trap(
+                &BusError::UnmappedAddress { addr: 0xdead_beef },
+                0x1000,
+                MemoryAccess::Instruction
+            ),
+            Some(Trap::Exception(Exception::InstructionAccessFault {
+                addr: 0x1000
+            }))
+        );
+        assert_eq!(
+            map_bus_error_to_trap(
+                &BusError::ReadOnlyAddress { addr: 0xdead_beef },
+                0x2000,
+                MemoryAccess::Load
+            ),
+            Some(Trap::Exception(Exception::LoadAccessFault { addr: 0x2000 }))
+        );
+        assert_eq!(
+            map_bus_error_to_trap(
+                &BusError::DeviceFault {
+                    addr: 0xdead_beef,
+                    message: "boom".to_string(),
+                },
+                0x3000,
+                MemoryAccess::Store
+            ),
+            Some(Trap::Exception(Exception::StoreAccessFault {
+                addr: 0x3000
+            }))
+        );
     }
 }

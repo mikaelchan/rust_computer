@@ -1709,6 +1709,42 @@ mod tests {
     }
 
     #[test]
+    fn traps_on_instruction_access_fault_during_fetch() {
+        let mut bus = TestBus::new(128);
+        bus.store_words(0x0020, &[encode_addi(10, 0, 1), encode_jal(0, 0)]);
+
+        let mut core = PipelineCore::new(0x1000);
+        core.hart_state_mut()
+            .csrs
+            .write(rvsim_isa::CsrAddress::Mtvec, 0x20);
+
+        for _ in 0..8 {
+            core.step_cycle(&mut bus)
+                .expect("instruction access fault should trap through pipeline");
+        }
+
+        assert_eq!(
+            core.hart_state().privilege,
+            crate::state::PrivilegeMode::Machine
+        );
+        assert_eq!(core.hart_state().registers.read(10), 1);
+        assert_eq!(core.hart_state().pc, 0x24);
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mcause),
+            1
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mepc),
+            0x1000
+        );
+        assert_eq!(
+            core.hart_state().csrs.read(rvsim_isa::CsrAddress::Mtval),
+            0x1000
+        );
+        assert_eq!(core.stats().trap_count, 1);
+    }
+
+    #[test]
     fn wfi_halts_until_interrupt_then_enters_machine_handler() {
         let mut bus = TestBus::new(128);
         bus.load_program(&[encode_wfi(), encode_addi(1, 0, 1), encode_jal(0, 0)]);

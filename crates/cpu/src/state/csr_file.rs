@@ -36,10 +36,13 @@ const MIP_WRITABLE_MASK: u32 = MIP_SSIP | MIP_MSIP;
 const SIP_WRITABLE_MASK: u32 = MIP_SSIP;
 // Only modeled exceptions that can arise below M-mode are delegatable.
 const MEDELEG_MASK: u32 = (1 << 0)
+    | (1 << 1)
     | (1 << 2)
     | (1 << 3)
     | (1 << 4)
+    | (1 << 5)
     | (1 << 6)
+    | (1 << 7)
     | (1 << 8)
     | (1 << 9)
     | (1 << 12)

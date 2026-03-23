@@ -42,7 +42,7 @@ pub enum MemoryAccess {
 pub enum TranslationResult {
     PhysicalAddress(u32),
     Stall,
-    PageFault(Trap),
+    Fault(Trap),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +100,7 @@ enum StepResult {
     Stall,
     Drained,
     Ready(u32),
-    PageFault(Trap),
+    Fault(Trap),
 }
 
 impl PageWalker {
@@ -152,7 +152,7 @@ impl PageWalker {
                 match self.step(bus, true)? {
                     StepResult::Stall => return Ok(TranslationResult::Stall),
                     StepResult::Drained => continue,
-                    StepResult::Ready(_) | StepResult::PageFault(_) => unreachable!(),
+                    StepResult::Ready(_) | StepResult::Fault(_) => unreachable!(),
                 }
             }
 
@@ -178,7 +178,7 @@ impl PageWalker {
                 StepResult::Ready(physical_address) => {
                     return Ok(TranslationResult::PhysicalAddress(physical_address));
                 }
-                StepResult::PageFault(trap) => return Ok(TranslationResult::PageFault(trap)),
+                StepResult::Fault(trap) => return Ok(TranslationResult::Fault(trap)),
                 StepResult::Stall => return Ok(TranslationResult::Stall),
                 StepResult::Drained => continue,
             }
@@ -210,7 +210,7 @@ impl PageWalker {
                 return Ok(if drain_only {
                     StepResult::Drained
                 } else {
-                    StepResult::PageFault(page_fault(state.request))
+                    StepResult::Fault(access_fault(state.request))
                 });
             }
         };
@@ -221,7 +221,7 @@ impl PageWalker {
             return Ok(if drain_only {
                 StepResult::Drained
             } else {
-                StepResult::PageFault(page_fault(state.request))
+                StepResult::Fault(page_fault(state.request))
             });
         }
 
@@ -232,7 +232,7 @@ impl PageWalker {
                 return Ok(if drain_only {
                     StepResult::Drained
                 } else {
-                    StepResult::PageFault(trap)
+                    StepResult::Fault(trap)
                 });
             };
             if !permissions_allow(state.request, flags) {
@@ -240,7 +240,7 @@ impl PageWalker {
                 return Ok(if drain_only {
                     StepResult::Drained
                 } else {
-                    StepResult::PageFault(trap)
+                    StepResult::Fault(trap)
                 });
             }
 
@@ -272,7 +272,7 @@ impl PageWalker {
             return Ok(if drain_only {
                 StepResult::Drained
             } else {
-                StepResult::PageFault(page_fault(state.request))
+                StepResult::Fault(page_fault(state.request))
             });
         }
 
@@ -319,7 +319,7 @@ impl PageWalker {
                 Ok(if drain_only {
                     StepResult::Drained
                 } else {
-                    StepResult::PageFault(page_fault(state.request))
+                    StepResult::Fault(access_fault(state.request))
                 })
             }
         }
@@ -342,7 +342,7 @@ impl PageWalker {
             return Some(TranslationResult::PhysicalAddress(entry.translate(request)));
         }
 
-        saw_permission_fault.then_some(TranslationResult::PageFault(page_fault(request)))
+        saw_permission_fault.then_some(TranslationResult::Fault(page_fault(request)))
     }
 
     fn insert_tlb(&mut self, state: WalkState, flags: u32, physical_address: u32) {
@@ -577,6 +577,20 @@ const fn page_fault(request: TranslationRequest) -> Trap {
     })
 }
 
+const fn access_fault(request: TranslationRequest) -> Trap {
+    Trap::Exception(match request.access {
+        MemoryAccess::Instruction => Exception::InstructionAccessFault {
+            addr: request.virtual_address,
+        },
+        MemoryAccess::Load => Exception::LoadAccessFault {
+            addr: request.virtual_address,
+        },
+        MemoryAccess::Store => Exception::StoreAccessFault {
+            addr: request.virtual_address,
+        },
+    })
+}
+
 const fn privilege_from_bits(bits: u32) -> PrivilegeMode {
     match bits {
         0 => PrivilegeMode::User,
@@ -620,22 +634,47 @@ mod tests {
 
     impl Bus for CountingBus {
         fn load8(&mut self, addr: u64) -> Result<u8, BusError> {
-            Ok(self.bytes[addr as usize])
+            self.bytes
+                .get(addr as usize)
+                .copied()
+                .ok_or(BusError::UnmappedAddress { addr })
         }
 
         fn store8(&mut self, addr: u64, value: u8) -> Result<(), BusError> {
-            self.bytes[addr as usize] = value;
+            let slot = self
+                .bytes
+                .get_mut(addr as usize)
+                .ok_or(BusError::UnmappedAddress { addr })?;
+            *slot = value;
             Ok(())
         }
 
         fn load32(&mut self, addr: u64) -> Result<u32, BusError> {
             self.load32_count += 1;
-            Ok(self.read_word(addr as u32))
+            if addr % 4 != 0 {
+                return Err(BusError::MisalignedAccess { addr, width: 4 });
+            }
+
+            let start = addr as usize;
+            let bytes = self
+                .bytes
+                .get(start..start + 4)
+                .ok_or(BusError::UnmappedAddress { addr })?;
+            Ok(u32::from_le_bytes(bytes.try_into().unwrap_or([0; 4])))
         }
 
         fn store32(&mut self, addr: u64, value: u32) -> Result<(), BusError> {
             self.store32_count += 1;
-            self.store_word(addr as u32, value);
+            if addr % 4 != 0 {
+                return Err(BusError::MisalignedAccess { addr, width: 4 });
+            }
+
+            let start = addr as usize;
+            let slots = self
+                .bytes
+                .get_mut(start..start + 4)
+                .ok_or(BusError::UnmappedAddress { addr })?;
+            slots.copy_from_slice(&value.to_le_bytes());
             Ok(())
         }
     }
@@ -741,9 +780,7 @@ mod tests {
 
         assert_eq!(
             translated,
-            TranslationResult::PageFault(Trap::Exception(Exception::LoadPageFault {
-                addr: 0x4123
-            }))
+            TranslationResult::Fault(Trap::Exception(Exception::LoadPageFault { addr: 0x4123 }))
         );
     }
 
@@ -782,9 +819,7 @@ mod tests {
 
         assert_eq!(
             without_mxr,
-            TranslationResult::PageFault(Trap::Exception(Exception::LoadPageFault {
-                addr: 0x4123
-            }))
+            TranslationResult::Fault(Trap::Exception(Exception::LoadPageFault { addr: 0x4123 }))
         );
         assert_eq!(with_mxr, TranslationResult::PhysicalAddress(0x1123));
     }
@@ -817,9 +852,30 @@ mod tests {
 
         assert_eq!(
             translated,
-            TranslationResult::PageFault(Trap::Exception(Exception::LoadPageFault {
-                addr: 0x4123
-            }))
+            TranslationResult::Fault(Trap::Exception(Exception::LoadPageFault { addr: 0x4123 }))
+        );
+    }
+
+    #[test]
+    fn page_table_walk_bus_fault_reports_access_fault_for_original_access() {
+        let mut bus = CountingBus::new(0x1000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Satp, sv32_satp(0x2000));
+
+        let translated = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("walk fault should still resolve to an architectural trap");
+
+        assert_eq!(
+            translated,
+            TranslationResult::Fault(Trap::Exception(Exception::LoadAccessFault { addr: 0x4123 }))
         );
     }
 
