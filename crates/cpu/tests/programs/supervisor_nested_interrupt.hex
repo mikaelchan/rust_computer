@@ -1,0 +1,47 @@
+# Supervisor mode takes a nested supervisor software interrupt after re-enabling SIE.
+# Host setup preloads:
+# - privilege = Supervisor
+# - controller source 1 enabled, routed to supervisor, and pending
+# - mideleg/sie enable supervisor external and software interrupts
+# - sstatus.SIE enabled
+# - stvec = 0x20 in vectored mode
+# The outer supervisor-external handler saves sepc/sstatus, claims and completes
+# the controller source, records x10 = 10, re-enables SIE, raises SSIP through
+# MMIO, then resumes after the nested handler to record x11 = 11, restore state,
+# and sret. The inner supervisor-software handler clears SSIP, records x12 = 12,
+# and sret returns to the outer handler. Mainline finally resumes and writes x1 = 1.
+# Expect x1 = 1, x10 = 10, x11 = 11, x12 = 12, x21 = 21, privilege = Supervisor.
+0x00100093
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x60000237
+0x00022023
+0x00c00613
+0x10200073
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x14102a73
+0x10002b73
+0x40000137
+0x00c12203
+0x00412623
+0x00a00513
+0x10016073
+0x01500a93
+0x600001b7
+0x00100293
+0x0051a023
+0x00b00593
+0x141a1073
+0x100b1073
+0x10200073
+0x00000013
+0x00000013

@@ -26,6 +26,8 @@ Current checked-in examples now cover:
 - delegated supervisor software interrupt delivery raised by a `sip` CSR write
 - machine timer interrupt delivery from the memory-mapped timer device
 - machine software interrupt preemption of a delegated supervisor external handler
+- same-mode machine interrupt nesting after software re-enables `mstatus.MIE`
+- same-mode supervisor interrupt nesting after software re-enables `sstatus.SIE`
 - user `cycleh` access with enabled counter delegation
 - user `instret` access with enabled counter delegation
 - `Sv32` translated loads from user-accessible pages

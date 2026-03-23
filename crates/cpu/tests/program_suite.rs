@@ -62,6 +62,10 @@ const CSR_SIP_SUPERVISOR_SOFTWARE_INTERRUPT_PROGRAM: &str =
 const MACHINE_TIMER_INTERRUPT_PROGRAM: &str = include_str!("programs/machine_timer_interrupt.hex");
 const MACHINE_PREEMPTS_SUPERVISOR_HANDLER_PROGRAM: &str =
     include_str!("programs/machine_preempts_supervisor_handler.hex");
+const MACHINE_NESTED_INTERRUPT_PROGRAM: &str =
+    include_str!("programs/machine_nested_interrupt.hex");
+const SUPERVISOR_NESTED_INTERRUPT_PROGRAM: &str =
+    include_str!("programs/supervisor_nested_interrupt.hex");
 const SV32_ASID_SWITCH_PROGRAM: &str = include_str!("programs/sv32_asid_switch.hex");
 const SV32_SFENCE_REMAP_PROGRAM: &str = include_str!("programs/sv32_sfence_remap.hex");
 const SV32_SUPERPAGE_PROGRAM: &str = include_str!("programs/sv32_superpage.hex");
@@ -419,6 +423,97 @@ where
     assert!(matches!(
         machine.cpu().hart_state().privilege,
         PrivilegeMode::User
+    ));
+}
+
+fn assert_machine_nested_interrupt_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with_map(
+        make_cpu(RESET_VECTOR),
+        MACHINE_NESTED_INTERRUPT_PROGRAM,
+        RAM_BYTES,
+        install_machine_timer_device,
+        setup_machine_nested_interrupt_state,
+    );
+
+    step_until(&mut machine, 96, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 1 && machine.cpu().hart_state().pc == 0x4
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 10);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), 11);
+    assert_eq!(machine.cpu().hart_state().registers.read(12), 12);
+    assert_eq!(machine.cpu().hart_state().registers.read(21), 21);
+    assert_eq!(machine.cpu().hart_state().pc, 0x4);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mcause),
+        0x8000_0003
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(TIMER_BASE + 8)
+            .expect("mtimecmp low should remain readable"),
+        256
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(MSIP_BASE)
+            .expect("MSIP register should remain readable"),
+        0
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Machine
+    ));
+}
+
+fn assert_supervisor_nested_interrupt_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SUPERVISOR_NESTED_INTERRUPT_PROGRAM,
+        RAM_BYTES,
+        setup_supervisor_nested_interrupt_state,
+    );
+
+    step_until(&mut machine, 96, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 1 && machine.cpu().hart_state().pc == 0x4
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 10);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), 11);
+    assert_eq!(machine.cpu().hart_state().registers.read(12), 12);
+    assert_eq!(machine.cpu().hart_state().registers.read(21), 21);
+    assert_eq!(machine.cpu().hart_state().pc, 0x4);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Scause),
+        0x8000_0001
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(CONTROLLER_BASE)
+            .expect("controller pending register should remain readable"),
+        0
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(SSIP_BASE)
+            .expect("SSIP register should remain readable"),
+        0
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Supervisor
     ));
 }
 
@@ -1408,6 +1503,74 @@ where
         .write(CsrAddress::Mtvec, 0x60);
 }
 
+fn setup_machine_nested_interrupt_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine
+        .bus_mut()
+        .store32(TIMER_BASE + 8, 1)
+        .expect("mtimecmp low should write during setup");
+    machine
+        .bus_mut()
+        .store32(TIMER_BASE + 12, 0)
+        .expect("mtimecmp high should write during setup");
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, 1 << 3);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mie, (1 << 7) | (1 << 3));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20 | 0b01);
+}
+
+fn setup_supervisor_nested_interrupt_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine
+        .bus_mut()
+        .store32(CONTROLLER_BASE + 4, 1)
+        .expect("controller enable register should write during setup");
+    machine
+        .bus_mut()
+        .store32(CONTROLLER_BASE + 16, 1)
+        .expect("controller route register should write during setup");
+    machine
+        .bus_mut()
+        .store32(CONTROLLER_BASE + 8, 1)
+        .expect("controller pending register should write during setup");
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mideleg, (1 << 9) | (1 << 1));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Sie, (1 << 9) | (1 << 1));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Sstatus, 1 << 1);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Stvec, 0x20 | 0b01);
+}
+
 fn setup_sv32_sfence_remap_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -2178,6 +2341,26 @@ fn reference_core_runs_machine_preempts_supervisor_handler_program() {
 #[test]
 fn pipeline_core_runs_machine_preempts_supervisor_handler_program() {
     assert_machine_preempts_supervisor_handler_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_machine_nested_interrupt_program() {
+    assert_machine_nested_interrupt_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_machine_nested_interrupt_program() {
+    assert_machine_nested_interrupt_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_supervisor_nested_interrupt_program() {
+    assert_supervisor_nested_interrupt_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_supervisor_nested_interrupt_program() {
+    assert_supervisor_nested_interrupt_program(PipelineCore::new);
 }
 
 #[test]
