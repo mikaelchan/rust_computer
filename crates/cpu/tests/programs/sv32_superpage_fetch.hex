@@ -1,0 +1,13 @@
+# Sv32 superpage fetch-and-data smoke test.
+# Reset starts from a virtual address covered by a root-leaf superpage mapping.
+# Program forms virtual address 0x0040_8000, stores 9 through it, reloads x10, then spins.
+# Expect instruction fetch and data access to both resolve through the same superpage mapping.
+0x004080b7
+0x00900113
+0x0020a023
+0x0000a503
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013

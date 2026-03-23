@@ -53,6 +53,8 @@ const VM_VALUE_A: u32 = 0x1111_2222;
 const VM_VALUE_B: u32 = 0x3333_4444;
 const VM_VALUE_C: u32 = 0x7777_8888;
 const VM_VALUE_D: u32 = 0x9999_AAAA;
+const VM_SUPERPAGE_FETCH_VIRTUAL_BASE: u32 = 0x0040_0000;
+const VM_SUPERPAGE_FETCH_DATA_PHYSICAL_ADDR: u64 = RAM_BASE + 0x8000;
 const VM_SUPERPAGE_VIRTUAL_ADDR: u32 = 0x0040_5000;
 const VM_SUPERPAGE_PHYSICAL_ADDR: u64 = RAM_BASE + 0x5000;
 const VM_SUPERPAGE_STORE_VALUE: u32 = 0x5555_6666;
@@ -75,6 +77,9 @@ const SV32_MPRV_TRANSLATED_LOAD_PROGRAM: &str =
 const SV32_SELECTIVE_SFENCE_PROGRAM: &str = include_str!("programs/sv32_selective_sfence.hex");
 const SV32_INSTRUCTION_PAGE_FAULT_PROGRAM: &str =
     include_str!("programs/sv32_instruction_page_fault.hex");
+const SV32_SUPERPAGE_FETCH_PROGRAM: &str = include_str!("programs/sv32_superpage_fetch.hex");
+const SV32_SATP_NAMESPACE_PRESERVE_PROGRAM: &str =
+    include_str!("programs/sv32_satp_namespace_preserve.hex");
 const CSR_MIP_MACHINE_SOFTWARE_INTERRUPT_PROGRAM: &str =
     include_str!("programs/csr_mip_machine_software_interrupt.hex");
 const CSR_SIP_SUPERVISOR_SOFTWARE_INTERRUPT_PROGRAM: &str =
@@ -873,6 +878,74 @@ where
     assert_eq!(
         machine.cpu().hart_state().csrs.read(CsrAddress::Mtval),
         VM_VIRTUAL_ADDR
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Machine
+    ));
+}
+
+fn assert_sv32_superpage_fetch_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let program_words = parse_program_image(SV32_SUPERPAGE_FETCH_PROGRAM);
+    let mut machine = build_machine_with(
+        make_cpu(VM_SUPERPAGE_FETCH_VIRTUAL_BASE),
+        SV32_SUPERPAGE_FETCH_PROGRAM,
+        VM_RAM_BYTES,
+        move |machine| setup_sv32_superpage_fetch_state(machine, &program_words),
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().registers.read(10) == 9
+            && machine.cpu().hart_state().pc == VM_SUPERPAGE_FETCH_VIRTUAL_BASE + 0x10
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 9);
+    assert_eq!(
+        machine.cpu().hart_state().pc,
+        VM_SUPERPAGE_FETCH_VIRTUAL_BASE + 0x10
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(VM_SUPERPAGE_FETCH_DATA_PHYSICAL_ADDR)
+            .expect("superpage fetch/data store target should remain readable"),
+        9
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Supervisor
+    ));
+}
+
+fn assert_sv32_satp_namespace_preserve_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SV32_SATP_NAMESPACE_PRESERVE_PROGRAM,
+        VM_RAM_BYTES,
+        setup_sv32_satp_namespace_preserve_state,
+    );
+
+    step_until(&mut machine, 64, |machine| {
+        machine.cpu().hart_state().registers.read(13) == VM_VALUE_C
+            && machine.cpu().hart_state().pc == 0x2c
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), VM_VALUE_A);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), VM_VALUE_B);
+    assert_eq!(machine.cpu().hart_state().registers.read(12), VM_VALUE_A);
+    assert_eq!(machine.cpu().hart_state().registers.read(13), VM_VALUE_C);
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(sv32_leaf_pte_addr(VM_LEAF_TABLE_1, VM_TRANSLATED_LOAD_ADDR))
+            .expect("updated ASID 1 leaf pte should remain readable"),
+        sv32_leaf_pte(VM_PHYS_PAGE_C as u32, PTE_R | PTE_A | PTE_D)
     );
     assert!(matches!(
         machine.cpu().hart_state().privilege,
@@ -1936,6 +2009,91 @@ where
         .write(CsrAddress::Mtvec, 0x80);
 }
 
+fn setup_sv32_superpage_fetch_state<P>(machine: &mut Machine<P, MemoryMap>, program_words: &[u32])
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    write_program_words(machine, RAM_BASE, program_words);
+    write_word(machine, VM_SUPERPAGE_FETCH_DATA_PHYSICAL_ADDR, 0);
+    install_sv32_superpage_mapping(
+        machine,
+        VM_ROOT_TABLE_3,
+        VM_SUPERPAGE_FETCH_VIRTUAL_BASE,
+        RAM_BASE as u32,
+        PTE_R | PTE_W | PTE_X | PTE_A | PTE_D,
+    );
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Satp, sv32_satp_with_asid(VM_ROOT_TABLE_3, 1));
+}
+
+fn setup_sv32_satp_namespace_preserve_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    write_word(machine, VM_PHYS_PAGE_A, VM_VALUE_A);
+    write_word(machine, VM_PHYS_PAGE_B, VM_VALUE_B);
+    write_word(machine, VM_PHYS_PAGE_C, VM_VALUE_C);
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_TRANSLATED_LOAD_ADDR,
+        VM_PHYS_PAGE_A as u32,
+        PTE_R | PTE_A | PTE_D,
+    );
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_2,
+        VM_LEAF_TABLE_2,
+        VM_TRANSLATED_LOAD_ADDR,
+        VM_PHYS_PAGE_B as u32,
+        PTE_R | PTE_A | PTE_D,
+    );
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(1, VM_TRANSLATED_LOAD_ADDR);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(2, sv32_satp_with_asid(VM_ROOT_TABLE_1, 1));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(3, sv32_satp_with_asid(VM_ROOT_TABLE_2, 2));
+    machine.cpu_mut().hart_state_mut().registers.write(
+        4,
+        sv32_leaf_pte_addr(VM_LEAF_TABLE_1, VM_TRANSLATED_LOAD_ADDR) as u32,
+    );
+    machine.cpu_mut().hart_state_mut().registers.write(
+        5,
+        sv32_leaf_pte(VM_PHYS_PAGE_C as u32, PTE_R | PTE_A | PTE_D),
+    );
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(6, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(7, 1 << MSTATUS_MPP_SHIFT);
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Machine;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+}
+
 fn setup_csr_mip_machine_software_interrupt_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -2944,6 +3102,15 @@ where
         .expect("RAM write during test setup should succeed");
 }
 
+fn write_program_words<P>(machine: &mut Machine<P, MemoryMap>, base: u64, words: &[u32])
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    for (index, word) in words.iter().copied().enumerate() {
+        write_word(machine, base + (index as u64) * 4, word);
+    }
+}
+
 fn install_sv32_mapping<P>(
     machine: &mut Machine<P, MemoryMap>,
     root_table: u64,
@@ -3176,6 +3343,26 @@ fn reference_core_runs_sv32_instruction_page_fault_program() {
 #[test]
 fn pipeline_core_runs_sv32_instruction_page_fault_program() {
     assert_sv32_instruction_page_fault_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_sv32_superpage_fetch_program() {
+    assert_sv32_superpage_fetch_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_sv32_superpage_fetch_program() {
+    assert_sv32_superpage_fetch_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_sv32_satp_namespace_preserve_program() {
+    assert_sv32_satp_namespace_preserve_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_sv32_satp_namespace_preserve_program() {
+    assert_sv32_satp_namespace_preserve_program(PipelineCore::new);
 }
 
 #[test]

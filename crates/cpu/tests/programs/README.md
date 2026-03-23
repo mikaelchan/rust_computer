@@ -37,6 +37,8 @@ Current checked-in examples now cover:
 - machine-mode translated loads through supervisor mappings under `mstatus.MPRV`
 - selective `sfence.vma` invalidation for one translated virtual address
 - machine trapping on an `Sv32` instruction page fault during fetch
+- `Sv32` root-leaf superpage instruction fetch plus data access through one mapping
+- `satp` ASID-namespace reuse that keeps a stale translation until `sfence.vma`
 - machine-mode writes and reads of the high-half `mcycleh` CSR
 - user `cycleh` access with enabled counter delegation
 - user `instret` access with enabled counter delegation
