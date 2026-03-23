@@ -1,0 +1,23 @@
+# Delegated supervisor software interrupt smoke test.
+# Host setup preloads:
+# - ssip pending in the supervisor software interrupt device
+# - privilege = User
+# - mideleg/sie enable supervisor software interrupts
+# - stvec = 0x20
+# The supervisor handler clears ssip, writes x10 = 4, returns with sret,
+# and user mainline resumes at PC 0 before spinning at PC 0x4.
+# Expect x1 = 5, x10 = 4, scause = interrupt 1, sepc = 0, privilege = User.
+0x00500093
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x60000137
+0x00012023
+0x00400513
+0x10200073
+0x00000013
+0x00000013

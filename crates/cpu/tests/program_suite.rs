@@ -1,5 +1,5 @@
 use rvsim_cpu::{CpuError, CpuModel, PipelineCore, PrivilegeMode, ReferenceCore};
-use rvsim_devices::{MachineSoftwareInterrupt, Ram, Rom};
+use rvsim_devices::{MachineSoftwareInterrupt, Ram, Rom, SupervisorSoftwareInterrupt};
 use rvsim_isa::CsrAddress;
 use rvsim_system::{Bus, Machine, MemoryMap, Processor};
 
@@ -8,6 +8,7 @@ const RAM_BASE: u64 = 0x1000_0000;
 const RAM_BYTES: usize = 0x1000;
 const VM_RAM_BYTES: usize = 0x8000;
 const MSIP_BASE: u64 = 0x5000_0000;
+const SSIP_BASE: u64 = 0x6000_0000;
 const PAGE_SHIFT: u32 = 12;
 const SATP_MODE_SV32: u32 = 1 << 31;
 const MSTATUS_MPRV: u32 = 1 << 17;
@@ -43,6 +44,8 @@ const SV32_GLOBAL_ASID_FENCE_PROGRAM: &str = include_str!("programs/sv32_global_
 const SV32_SUM_FAULT_PROGRAM: &str = include_str!("programs/sv32_sum_fault.hex");
 const DELEGATED_USER_ECALL_PROGRAM: &str = include_str!("programs/delegated_user_ecall.hex");
 const MACHINE_ECALL_RETURN_PROGRAM: &str = include_str!("programs/machine_ecall_return.hex");
+const DELEGATED_SSIP_INTERRUPT_PROGRAM: &str =
+    include_str!("programs/delegated_ssip_interrupt.hex");
 
 fn parse_program_image(source: &str) -> Vec<u32> {
     source
@@ -89,6 +92,9 @@ where
     memory
         .map_device(MachineSoftwareInterrupt::new(MSIP_BASE))
         .expect("MSIP device should map");
+    memory
+        .map_device(SupervisorSoftwareInterrupt::new(SSIP_BASE))
+        .expect("SSIP device should map");
 
     let mut machine = Machine::new(cpu, memory);
     setup(&mut machine);
@@ -363,6 +369,45 @@ where
     ));
 }
 
+fn assert_delegated_ssip_interrupt_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        DELEGATED_SSIP_INTERRUPT_PROGRAM,
+        RAM_BYTES,
+        setup_delegated_ssip_interrupt_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 5
+            && machine.cpu().hart_state().registers.read(10) == 4
+            && machine.cpu().hart_state().pc == 0x4
+            && matches!(machine.cpu().hart_state().privilege, PrivilegeMode::User)
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 5);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 4);
+    assert_eq!(machine.cpu().hart_state().pc, 0x4);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Scause),
+        0x8000_0001
+    );
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Sepc), 0);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::User
+    ));
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(SSIP_BASE)
+            .expect("SSIP register should remain readable"),
+        0
+    );
+}
+
 fn setup_sv32_asid_switch_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -620,6 +665,32 @@ where
         .write(CsrAddress::Mtvec, 0x20);
 }
 
+fn setup_delegated_ssip_interrupt_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine
+        .bus_mut()
+        .store32(SSIP_BASE, 1)
+        .expect("SSIP register should write during setup");
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::User;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mideleg, 1 << 1);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Sie, 1 << 1);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Stvec, 0x20);
+}
+
 fn write_word<P>(machine: &mut Machine<P, MemoryMap>, addr: u64, value: u32)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -778,4 +849,14 @@ fn reference_core_runs_machine_ecall_return_program() {
 #[test]
 fn pipeline_core_runs_machine_ecall_return_program() {
     assert_machine_ecall_return_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_delegated_ssip_interrupt_program() {
+    assert_delegated_ssip_interrupt_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_delegated_ssip_interrupt_program() {
+    assert_delegated_ssip_interrupt_program(PipelineCore::new);
 }

@@ -22,6 +22,7 @@ Current checked-in examples now cover:
 - simple load/store behavior
 - simple counted control flow
 - machine software interrupt delivery
+- delegated supervisor software interrupt delivery with `sret` return
 - machine `ecall` delivery into a machine handler with `mret` return
 - delegated user-ecall delivery into a supervisor handler with `sret` return
 - `Sv32` ASID namespace switching
