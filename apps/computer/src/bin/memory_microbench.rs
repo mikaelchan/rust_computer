@@ -58,6 +58,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .global_switched_asid_cycles,
         report.translation_caching.pipeline.sfence_reload_cycles
     );
+    println!(
+        "virtual_memory_paths: reference(superpage_access={} namespace_preserved={} namespace_reloaded={}) pipeline(superpage_access={} namespace_preserved={} namespace_reloaded={})",
+        report
+            .virtual_memory_paths
+            .reference
+            .superpage_access_cycles,
+        report
+            .virtual_memory_paths
+            .reference
+            .namespace_preserved_cycles,
+        report
+            .virtual_memory_paths
+            .reference
+            .namespace_reloaded_cycles,
+        report.virtual_memory_paths.pipeline.superpage_access_cycles,
+        report
+            .virtual_memory_paths
+            .pipeline
+            .namespace_preserved_cycles,
+        report
+            .virtual_memory_paths
+            .pipeline
+            .namespace_reloaded_cycles
+    );
 
     Ok(())
 }

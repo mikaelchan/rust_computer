@@ -54,7 +54,7 @@ This makes `main.rs` closer to a system integration notebook than to a minimal C
 - Each benchmark builds only the machine pieces needed for one phenomenon.
 - Reports are typed structs rather than ad hoc strings, so tests can validate them and binaries can print them.
 - The benchmark helpers measure stall cycles by repeatedly advancing the underlying bus or machine until the target action completes.
-- The current suite covers cache conflicts, line refills, dirty write-back pressure, interrupt latency, and translation-caching behavior across ASID switches and `sfence.vma`.
+- The current suite covers cache conflicts, line refills, dirty write-back pressure, interrupt latency, translation-caching behavior across ASID switches and `sfence.vma`, plus focused virtual-memory path experiments such as root-leaf superpage translated accesses and stale-namespace preservation before a fence.
 
 This keeps the measurement logic explicit and reusable.
 

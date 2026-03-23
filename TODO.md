@@ -92,3 +92,6 @@ The current baseline already has:
 
 - [x] Add more user-facing documentation for memory experiments.
   `docs/memory_experiments.md` now documents recommended configurations, cache policies, expected timing behavior, and the `memory_microbench` workflow.
+
+- [ ] Defer the remaining architectural test backlog into smaller follow-on batches.
+  The current program suite already covers 90+ shared regressions, so the remaining work can wait while implementation focus moves back to non-test surfaces. Likely future additions are supervisor/user counter-visibility paths beyond the current `cycleh` and `instret` slices, more malformed-page and permission-shape regressions around superpages plus ASID-targeted fences, and narrower privilege/trap precision corners that are still only covered by unit-style core tests.

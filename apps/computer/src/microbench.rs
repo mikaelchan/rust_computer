@@ -11,7 +11,7 @@ use rvsim_system::{
 const RESET_VECTOR: u32 = 0;
 const RAM_BASE: Address = 0x1000_0000;
 const RAM_BYTES: usize = 0x1000;
-const VM_RAM_BYTES: usize = 0x8000;
+const VM_RAM_BYTES: usize = 0x10000;
 const MSIP_BASE: Address = 0x5000_0000;
 const NOP: u32 = 0x0000_0013;
 const MRET: u32 = 0x3020_0073;
@@ -22,6 +22,7 @@ const MSTATUS_MPP_SHIFT: u32 = 11;
 const PTE_V: u32 = 1 << 0;
 const PTE_R: u32 = 1 << 1;
 const PTE_W: u32 = 1 << 2;
+const PTE_X: u32 = 1 << 3;
 const PTE_G: u32 = 1 << 5;
 const PTE_A: u32 = 1 << 6;
 const PTE_D: u32 = 1 << 7;
@@ -29,11 +30,16 @@ const VM_ROOT_TABLE_1: Address = RAM_BASE;
 const VM_LEAF_TABLE_1: Address = RAM_BASE + 0x1000;
 const VM_ROOT_TABLE_2: Address = RAM_BASE + 0x2000;
 const VM_LEAF_TABLE_2: Address = RAM_BASE + 0x3000;
+const VM_ROOT_TABLE_3: Address = RAM_BASE + 0x6000;
 const VM_PHYS_PAGE_A: Address = RAM_BASE + 0x4000;
 const VM_PHYS_PAGE_B: Address = RAM_BASE + 0x5000;
+const VM_PHYS_PAGE_C: Address = RAM_BASE + 0x7000;
 const VM_VIRTUAL_ADDR: u32 = 0x4000;
 const VM_VALUE_A: u32 = 0x1111_2222;
 const VM_VALUE_B: u32 = 0x3333_4444;
+const VM_VALUE_C: u32 = 0x7777_8888;
+const VM_SUPERPAGE_VIRTUAL_BASE: u32 = 0x0040_0000;
+const VM_SUPERPAGE_DATA_PHYSICAL_ADDR: Address = RAM_BASE + 0x8000;
 
 #[derive(Debug)]
 pub enum MicrobenchError {
@@ -119,12 +125,26 @@ pub struct TranslationCachingReport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtualMemoryPathsSample {
+    pub superpage_access_cycles: u64,
+    pub namespace_preserved_cycles: u64,
+    pub namespace_reloaded_cycles: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtualMemoryPathsReport {
+    pub reference: VirtualMemoryPathsSample,
+    pub pipeline: VirtualMemoryPathsSample,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryMicrobenchReport {
     pub conflict_miss: ConflictMissReport,
     pub line_refill: LineRefillReport,
     pub write_back_pressure: WriteBackPressureReport,
     pub interrupt_latency: InterruptLatencyReport,
     pub translation_caching: TranslationCachingReport,
+    pub virtual_memory_paths: VirtualMemoryPathsReport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +165,7 @@ pub fn run_memory_microbenchmarks() -> Result<MemoryMicrobenchReport, Microbench
         write_back_pressure: run_write_back_pressure_benchmark()?,
         interrupt_latency: run_interrupt_latency_benchmark()?,
         translation_caching: run_translation_caching_benchmark()?,
+        virtual_memory_paths: run_virtual_memory_paths_benchmark()?,
     })
 }
 
@@ -245,6 +266,13 @@ pub fn run_translation_caching_benchmark() -> Result<TranslationCachingReport, M
     Ok(TranslationCachingReport {
         reference: measure_translation_caching(ReferenceCore::new)?,
         pipeline: measure_translation_caching(PipelineCore::new)?,
+    })
+}
+
+pub fn run_virtual_memory_paths_benchmark() -> Result<VirtualMemoryPathsReport, MicrobenchError> {
+    Ok(VirtualMemoryPathsReport {
+        reference: measure_virtual_memory_paths(ReferenceCore::new)?,
+        pipeline: measure_virtual_memory_paths(PipelineCore::new)?,
     })
 }
 
@@ -397,6 +425,71 @@ where
     })
 }
 
+fn measure_virtual_memory_paths<P>(
+    make_cpu: fn(u32) -> P,
+) -> Result<VirtualMemoryPathsSample, MicrobenchError>
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut superpage_machine = build_superpage_access_machine(make_cpu)?;
+    let superpage_start = superpage_machine.clock().current();
+    step_until(
+        &mut superpage_machine,
+        256,
+        "superpage access flow",
+        |machine| machine.cpu().hart_state().registers.read(10) == 9,
+    )?;
+    let superpage_access_cycles = superpage_machine.clock().current() - superpage_start;
+
+    let mut namespace_machine = build_namespace_preserve_machine(make_cpu)?;
+    step_until(
+        &mut namespace_machine,
+        256,
+        "namespace preserve warmup",
+        |machine| machine.cpu().hart_state().registers.read(3) >= 2,
+    )?;
+    assert_eq!(
+        namespace_machine.cpu().hart_state().registers.read(10),
+        VM_VALUE_A
+    );
+    assert_eq!(
+        namespace_machine.cpu().hart_state().registers.read(11),
+        VM_VALUE_B
+    );
+
+    let namespace_preserve_start = namespace_machine.clock().current();
+    step_until(
+        &mut namespace_machine,
+        256,
+        "namespace preserved stale load",
+        |machine| machine.cpu().hart_state().registers.read(3) >= 3,
+    )?;
+    assert_eq!(
+        namespace_machine.cpu().hart_state().registers.read(12),
+        VM_VALUE_A
+    );
+    let namespace_preserved_cycles = namespace_machine.clock().current() - namespace_preserve_start;
+
+    let namespace_reload_start = namespace_machine.clock().current();
+    step_until(
+        &mut namespace_machine,
+        256,
+        "namespace reloaded load",
+        |machine| machine.cpu().hart_state().registers.read(3) >= 4,
+    )?;
+    assert_eq!(
+        namespace_machine.cpu().hart_state().registers.read(13),
+        VM_VALUE_C
+    );
+    let namespace_reloaded_cycles = namespace_machine.clock().current() - namespace_reload_start;
+
+    Ok(VirtualMemoryPathsSample {
+        superpage_access_cycles,
+        namespace_preserved_cycles,
+        namespace_reloaded_cycles,
+    })
+}
+
 fn build_interrupt_machine<P>(
     make_cpu: fn(u32) -> P,
     load: InterruptLoad,
@@ -511,6 +604,126 @@ where
         .hart_state_mut()
         .registers
         .write(5, satp_asid_2);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Satp, satp_asid_1);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+
+    Ok(machine)
+}
+
+fn build_superpage_access_machine<P>(
+    make_cpu: fn(u32) -> P,
+) -> Result<Machine<P, MemoryMap>, MicrobenchError>
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let program = superpage_access_program();
+    let mut ram = Ram::new(RAM_BASE, VM_RAM_BYTES);
+    write_word(&mut ram, VM_SUPERPAGE_DATA_PHYSICAL_ADDR, 9)?;
+    install_sv32_superpage_mapping(
+        &mut ram,
+        VM_ROOT_TABLE_3,
+        VM_SUPERPAGE_VIRTUAL_BASE,
+        RAM_BASE as u32,
+        PTE_R | PTE_W | PTE_X | PTE_A | PTE_D,
+    )?;
+
+    let mut memory = MemoryMap::new();
+    memory.map_device(Rom::from_words(RESET_VECTOR as u64, &program))?;
+    memory.map_device(LatencyAdapter::new(ram, 4))?;
+
+    let mut machine = Machine::new(make_cpu(RESET_VECTOR), memory);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Satp, sv32_satp_with_asid(VM_ROOT_TABLE_3, 1));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+    Ok(machine)
+}
+
+fn build_namespace_preserve_machine<P>(
+    make_cpu: fn(u32) -> P,
+) -> Result<Machine<P, MemoryMap>, MicrobenchError>
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let satp_asid_1 = sv32_satp_with_asid(VM_ROOT_TABLE_1, 1);
+    let satp_asid_2 = sv32_satp_with_asid(VM_ROOT_TABLE_2, 2);
+
+    let mut ram = Ram::new(RAM_BASE, VM_RAM_BYTES);
+    write_word(&mut ram, VM_PHYS_PAGE_A, VM_VALUE_A)?;
+    write_word(&mut ram, VM_PHYS_PAGE_B, VM_VALUE_B)?;
+    write_word(&mut ram, VM_PHYS_PAGE_C, VM_VALUE_C)?;
+    install_sv32_mapping(
+        &mut ram,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_VIRTUAL_ADDR,
+        VM_PHYS_PAGE_A as u32,
+        PTE_R | PTE_A | PTE_D,
+    )?;
+    install_sv32_mapping(
+        &mut ram,
+        VM_ROOT_TABLE_2,
+        VM_LEAF_TABLE_2,
+        VM_VIRTUAL_ADDR,
+        VM_PHYS_PAGE_B as u32,
+        PTE_R | PTE_A | PTE_D,
+    )?;
+
+    let mut memory = MemoryMap::new();
+    memory.map_device(Rom::from_words(
+        RESET_VECTOR as u64,
+        &namespace_preserve_program(),
+    ))?;
+    memory.map_device(LatencyAdapter::new(ram, 4))?;
+
+    let mut machine = Machine::new(make_cpu(RESET_VECTOR), memory);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(1, VM_VIRTUAL_ADDR);
+    machine.cpu_mut().hart_state_mut().registers.write(
+        4,
+        (VM_LEAF_TABLE_1 + (((VM_VIRTUAL_ADDR >> 12) & 0x3ff) as u64) * 4) as u32,
+    );
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(5, satp_asid_2);
+    machine.cpu_mut().hart_state_mut().registers.write(
+        6,
+        PTE_V | PTE_R | PTE_A | PTE_D | ((VM_PHYS_PAGE_C as u32 >> PAGE_SHIFT) << 10),
+    );
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(7, 1 << MSTATUS_MPP_SHIFT);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(8, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(9, satp_asid_1);
     machine
         .cpu_mut()
         .hart_state_mut()
@@ -648,12 +861,50 @@ fn global_translation_program() -> Vec<u32> {
     ]
 }
 
+fn superpage_access_program() -> Vec<u32> {
+    vec![
+        encode_lui(1, VM_SUPERPAGE_VIRTUAL_BASE.wrapping_add(0x8000) >> 12),
+        encode_lw(10, 1, 0),
+        encode_jal(0, 0),
+    ]
+}
+
+fn namespace_preserve_program() -> Vec<u32> {
+    vec![
+        encode_lw(10, 1, 0),
+        encode_addi(3, 3, 1),
+        encode_csrrw(0, CsrAddress::Satp as u16, 5),
+        encode_lw(11, 1, 0),
+        encode_addi(3, 3, 1),
+        encode_csrrw(0, CsrAddress::Mstatus as u16, 7),
+        encode_sw(6, 4, 0),
+        encode_csrrw(0, CsrAddress::Mstatus as u16, 8),
+        encode_csrrw(0, CsrAddress::Satp as u16, 9),
+        encode_lw(12, 1, 0),
+        encode_addi(3, 3, 1),
+        encode_sfence_vma(0, 0),
+        encode_lw(13, 1, 0),
+        encode_addi(3, 3, 1),
+        encode_jal(0, 0),
+    ]
+}
+
 fn encode_addi(rd: u8, rs1: u8, imm: i16) -> u32 {
     encode_i(imm, rs1, 0b000, rd, 0b0010011)
 }
 
 fn encode_lw(rd: u8, rs1: u8, imm: i16) -> u32 {
     encode_i(imm, rs1, 0b010, rd, 0b0000011)
+}
+
+fn encode_sw(rs2: u8, rs1: u8, imm: i16) -> u32 {
+    let imm = imm as u16 as u32;
+    (((imm >> 5) & 0x7f) << 25)
+        | ((rs2 as u32) << 20)
+        | ((rs1 as u32) << 15)
+        | (0b010 << 12)
+        | ((imm & 0x1f) << 7)
+        | 0b0100011
 }
 
 fn encode_lui(rd: u8, upper_20: u32) -> u32 {
@@ -706,6 +957,22 @@ where
     Ok(())
 }
 
+fn install_sv32_superpage_mapping<D>(
+    device: &mut D,
+    root_table: Address,
+    virtual_address: u32,
+    physical_base: u32,
+    flags: u32,
+) -> Result<(), MicrobenchError>
+where
+    D: Addressable,
+{
+    let root_index = ((virtual_address >> 22) & 0x3ff) as u64;
+    let root_pte = PTE_V | flags | ((physical_base >> PAGE_SHIFT) << 10);
+    write_word(device, root_table + root_index * 4, root_pte)?;
+    Ok(())
+}
+
 const fn sv32_satp_with_asid(root_table: Address, asid: u32) -> u32 {
     SATP_MODE_SV32 | (asid << 22) | ((root_table as u32) >> PAGE_SHIFT)
 }
@@ -715,7 +982,7 @@ mod tests {
     use super::{
         run_conflict_miss_benchmark, run_interrupt_latency_benchmark, run_line_refill_benchmark,
         run_memory_microbenchmarks, run_translation_caching_benchmark,
-        run_write_back_pressure_benchmark,
+        run_virtual_memory_paths_benchmark, run_write_back_pressure_benchmark,
     };
 
     #[test]
@@ -763,6 +1030,17 @@ mod tests {
             assert!(sample.switched_asid_cycles >= sample.returned_asid_cycles);
             assert!(sample.global_switched_asid_cycles <= sample.switched_asid_cycles);
             assert!(sample.sfence_reload_cycles >= sample.returned_asid_cycles);
+        }
+    }
+
+    #[test]
+    fn virtual_memory_paths_benchmark_reports_superpage_and_namespace_flows() {
+        let report = run_virtual_memory_paths_benchmark().expect("benchmark should run");
+
+        for sample in [report.reference, report.pipeline] {
+            assert!(sample.superpage_access_cycles > 0);
+            assert!(sample.namespace_preserved_cycles > 0);
+            assert!(sample.namespace_reloaded_cycles > 0);
         }
     }
 

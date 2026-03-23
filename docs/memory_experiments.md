@@ -179,6 +179,31 @@ Interpretation:
 - global mappings remain reusable across ASIDs
 - `sfence.vma` restores the page-walk cost on the next translated access
 
+### Virtual Memory Path Experiments
+
+Use this when you want a compact end-to-end view of two VM behaviors that are more architectural than cache-oriented:
+
+- root-leaf superpage translated data access
+- reusing a previously cached ASID namespace after rewriting its page-table leaf, before and after `sfence.vma`
+
+Recommended shape:
+
+- keep the superpage case focused on one translated data target under a root-leaf mapping
+- keep the namespace case host-driven so the benchmark can rewrite a leaf PTE physically between translated loads
+- report the preserved-namespace phase separately from the post-`sfence.vma` reload phase
+
+Current sample output:
+
+```text
+virtual_memory_paths: reference(superpage_access=10 namespace_preserved=14 namespace_reloaded=15) pipeline(superpage_access=14 namespace_preserved=22 namespace_reloaded=18)
+```
+
+Interpretation:
+
+- the superpage number captures one whole translated root-leaf access path instead of only a two-level page-walk case
+- the preserved-namespace phase confirms the old translation can still be observed after the leaf rewrite until software fences it away
+- the reloaded phase shows the post-`sfence.vma` path that must observe the new mapping
+
 ## Cache Policy Recommendations
 
 Use these policy combinations depending on what you want to learn:
