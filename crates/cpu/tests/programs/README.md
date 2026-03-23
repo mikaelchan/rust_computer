@@ -60,6 +60,7 @@ Current checked-in examples now cover:
 - supervisor `sret` trapped by `mstatus.TSR` with `mret` return
 - supervisor `wfi` trapped by `mstatus.TW` with `mret` return
 - user machine-CSR access trapped by machine mode with `mret` return
+- user `time` access trapped by missing `scounteren` with `mret` return
 - user `instret` access trapped by missing `scounteren` with `mret` return
 - `Sv32` ASID namespace switching
 - `Sv32` combined virtual-address plus ASID selective `sfence.vma`
