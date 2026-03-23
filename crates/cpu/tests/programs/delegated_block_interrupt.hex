@@ -1,0 +1,25 @@
+# Delegated supervisor external interrupt from block-device completion.
+# Host setup preloads:
+# - privilege = User
+# - mideleg/sie enable supervisor external interrupts
+# - stvec = 0x20
+# - block device block 1 contains two words: 0x11223344 and 0x55667788
+# Mainline programs block index 1, routes completion to supervisor external,
+# starts a read with IRQ enabled, then spins at PC 0x1c.
+# The supervisor handler clears STATUS_DONE, writes x10 = 7, returns with sret,
+# and user mainline resumes at PC 0x1c.
+# Expect x1 = 5, x10 = 7, scause = interrupt 9, sepc = 0x1c, privilege = User.
+0x00500093
+0x70000137
+0x00100193
+0x00312023
+0x02312023
+0x01100213
+0x00412223
+0x0000006f
+0x70000137
+0x00800293
+0x00512223
+0x00700513
+0x10200073
+0x0000006f

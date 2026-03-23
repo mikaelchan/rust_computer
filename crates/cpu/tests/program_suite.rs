@@ -1,6 +1,7 @@
 use rvsim_cpu::{CpuError, CpuModel, PipelineCore, PrivilegeMode, ReferenceCore};
 use rvsim_devices::{
-    InterruptController, MachineSoftwareInterrupt, Ram, Rom, SupervisorSoftwareInterrupt,
+    BlockDevice, InterruptController, MachineSoftwareInterrupt, Ram, Rom,
+    SupervisorSoftwareInterrupt,
 };
 use rvsim_isa::CsrAddress;
 use rvsim_system::{Bus, Machine, MemoryMap, Processor};
@@ -12,6 +13,8 @@ const VM_RAM_BYTES: usize = 0x8000;
 const CONTROLLER_BASE: u64 = 0x4000_0000;
 const MSIP_BASE: u64 = 0x5000_0000;
 const SSIP_BASE: u64 = 0x6000_0000;
+const BLOCK_BASE: u64 = 0x7000_0000;
+const BLOCK_BYTES: usize = 16;
 const PAGE_SHIFT: u32 = 12;
 const SATP_MODE_SV32: u32 = 1 << 31;
 const MSTATUS_MPRV: u32 = 1 << 17;
@@ -51,6 +54,8 @@ const DELEGATED_SSIP_INTERRUPT_PROGRAM: &str =
     include_str!("programs/delegated_ssip_interrupt.hex");
 const DELEGATED_EXTERNAL_INTERRUPT_PROGRAM: &str =
     include_str!("programs/delegated_external_interrupt.hex");
+const DELEGATED_BLOCK_INTERRUPT_PROGRAM: &str =
+    include_str!("programs/delegated_block_interrupt.hex");
 
 fn parse_program_image(source: &str) -> Vec<u32> {
     source
@@ -86,6 +91,21 @@ where
     P: Processor<Error = CpuError> + CpuModel,
     F: FnOnce(&mut Machine<P, MemoryMap>),
 {
+    build_machine_with_map(cpu, program_image, ram_bytes, |_| {}, setup)
+}
+
+fn build_machine_with_map<P, M, F>(
+    cpu: P,
+    program_image: &str,
+    ram_bytes: usize,
+    map_setup: M,
+    setup: F,
+) -> Machine<P, MemoryMap>
+where
+    P: Processor<Error = CpuError> + CpuModel,
+    M: FnOnce(&mut MemoryMap),
+    F: FnOnce(&mut Machine<P, MemoryMap>),
+{
     let words = parse_program_image(program_image);
     let mut memory = MemoryMap::new();
     memory
@@ -103,6 +123,7 @@ where
     memory
         .map_device(SupervisorSoftwareInterrupt::new(SSIP_BASE))
         .expect("SSIP device should map");
+    map_setup(&mut memory);
 
     let mut machine = Machine::new(cpu, memory);
     setup(&mut machine);
@@ -455,6 +476,65 @@ where
     );
 }
 
+fn assert_delegated_block_interrupt_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with_map(
+        make_cpu(RESET_VECTOR),
+        DELEGATED_BLOCK_INTERRUPT_PROGRAM,
+        RAM_BYTES,
+        install_block_interrupt_device,
+        setup_delegated_block_interrupt_state,
+    );
+
+    step_until(&mut machine, 48, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 5
+            && machine.cpu().hart_state().registers.read(10) == 7
+            && machine.cpu().hart_state().pc == 0x1c
+            && matches!(machine.cpu().hart_state().privilege, PrivilegeMode::User)
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 5);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 7);
+    assert_eq!(machine.cpu().hart_state().pc, 0x1c);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Scause),
+        0x8000_0009
+    );
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Sepc), 0x1c);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::User
+    ));
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(BLOCK_BASE + BlockDevice::CONTROL_OFFSET)
+            .expect("block control register should remain readable")
+            & BlockDevice::STATUS_DONE,
+        0
+    );
+    assert_eq!(
+        machine.bus_mut().pending_interrupts().highest_priority(),
+        None
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(BLOCK_BASE + BlockDevice::DATA_WINDOW_OFFSET)
+            .expect("block data word 0 should remain readable"),
+        0x1122_3344
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(BLOCK_BASE + BlockDevice::DATA_WINDOW_OFFSET + 4)
+            .expect("block data word 1 should remain readable"),
+        0x5566_7788
+    );
+}
+
 fn setup_sv32_asid_switch_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -772,6 +852,43 @@ where
         .write(CsrAddress::Stvec, 0x20);
 }
 
+fn install_block_interrupt_device(memory: &mut MemoryMap) {
+    let mut block_device = BlockDevice::new(BLOCK_BASE, 4, BLOCK_BYTES, 2);
+    block_device
+        .write_block_contents(
+            1,
+            &[
+                0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        )
+        .expect("block image should load");
+    memory
+        .map_device(block_device)
+        .expect("block device should map");
+}
+
+fn setup_delegated_block_interrupt_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::User;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mideleg, 1 << 9);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Sie, 1 << 9);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Stvec, 0x20);
+}
+
 fn write_word<P>(machine: &mut Machine<P, MemoryMap>, addr: u64, value: u32)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -950,4 +1067,14 @@ fn reference_core_runs_delegated_external_interrupt_program() {
 #[test]
 fn pipeline_core_runs_delegated_external_interrupt_program() {
     assert_delegated_external_interrupt_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_delegated_block_interrupt_program() {
+    assert_delegated_block_interrupt_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_delegated_block_interrupt_program() {
+    assert_delegated_block_interrupt_program(PipelineCore::new);
 }

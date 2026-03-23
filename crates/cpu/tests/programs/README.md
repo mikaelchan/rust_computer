@@ -24,6 +24,7 @@ Current checked-in examples now cover:
 - machine software interrupt delivery
 - delegated supervisor software interrupt delivery with `sret` return
 - delegated supervisor external interrupt delivery with controller claim/complete
+- delegated supervisor external interrupt delivery from block-device completion
 - machine `ecall` delivery into a machine handler with `mret` return
 - delegated user-ecall delivery into a supervisor handler with `sret` return
 - `Sv32` ASID namespace switching
