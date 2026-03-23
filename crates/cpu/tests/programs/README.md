@@ -38,6 +38,7 @@ Current checked-in examples now cover:
 - selective `sfence.vma` invalidation for one translated virtual address
 - machine trapping on an `Sv32` instruction page fault during fetch
 - machine trapping on an `Sv32` malformed non-leaf PTE with reserved `A/D/U` shape bits
+- machine trapping on an `Sv32` malformed superpage leaf with non-zero lower `PPN` bits
 - `Sv32` root-leaf superpage instruction fetch plus data access through one mapping
 - `satp` ASID-namespace reuse that keeps a stale translation until `sfence.vma`
 - machine-mode writes and reads of the high-half `mcycleh` CSR
