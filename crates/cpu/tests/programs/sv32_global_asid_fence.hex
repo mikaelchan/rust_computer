@@ -1,0 +1,27 @@
+# Sv32 global-mapping targeted-fence smoke test.
+# Host setup preloads:
+# - x1 = translated virtual address
+# - x2 = satp for ASID 1
+# - x3 = satp for ASID 2
+# - x4 = physical leaf-PTE address shared by both address spaces
+# - x5 = target ASID for the selective sfence.vma
+# - x6 = mstatus with MPRV and MPP=Supervisor
+# - x7 = mstatus with only MPP=Supervisor
+# - x8 = replacement non-global leaf PTE mapping to value B
+# Expect x10 = A, x11 = A after ASID-specific sfence.vma, and x12 = B after full sfence.vma.
+# Trailing nops leave safe speculative fetch space for the pipeline core.
+0x18011073
+0x0000a503
+0x30039073
+0x00822023
+0x30031073
+0x18019073
+0x12500073
+0x0000a583
+0x12000073
+0x0000a603
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013

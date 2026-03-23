@@ -38,6 +38,8 @@ That split is intentional. Unit tests prove local invariants; integration tests 
   Narrows validation to the pipelined core's simple control-flow program path.
 - `cargo test -p rvsim-cpu --test program_suite reference_core_runs_sv32_sfence_remap_program`
   Narrows validation to the reference core's pagetable-remap plus `sfence.vma` program path.
+- `cargo test -p rvsim-cpu --test program_suite pipeline_core_runs_sv32_global_asid_fence_program`
+  Narrows validation to the pipelined core's global-mapping plus ASID-specific fence program path.
 
 ## Related Reading
 

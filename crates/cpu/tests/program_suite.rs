@@ -15,6 +15,7 @@ const MSTATUS_MPP_SHIFT: u32 = 11;
 const PTE_V: u32 = 1 << 0;
 const PTE_R: u32 = 1 << 1;
 const PTE_W: u32 = 1 << 2;
+const PTE_G: u32 = 1 << 5;
 const PTE_A: u32 = 1 << 6;
 const PTE_D: u32 = 1 << 7;
 const VM_ROOT_TABLE_1: u64 = RAM_BASE;
@@ -37,6 +38,7 @@ const MSIP_INTERRUPT_PROGRAM: &str = include_str!("programs/msip_interrupt.hex")
 const SV32_ASID_SWITCH_PROGRAM: &str = include_str!("programs/sv32_asid_switch.hex");
 const SV32_SFENCE_REMAP_PROGRAM: &str = include_str!("programs/sv32_sfence_remap.hex");
 const SV32_SUPERPAGE_PROGRAM: &str = include_str!("programs/sv32_superpage.hex");
+const SV32_GLOBAL_ASID_FENCE_PROGRAM: &str = include_str!("programs/sv32_global_asid_fence.hex");
 
 fn parse_program_image(source: &str) -> Vec<u32> {
     source
@@ -248,6 +250,33 @@ where
     );
 }
 
+fn assert_sv32_global_asid_fence_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SV32_GLOBAL_ASID_FENCE_PROGRAM,
+        VM_RAM_BYTES,
+        setup_sv32_global_asid_fence_state,
+    );
+
+    step_until(&mut machine, 64, |machine| {
+        machine.cpu().hart_state().registers.read(12) == VM_VALUE_B
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), VM_VALUE_A);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), VM_VALUE_A);
+    assert_eq!(machine.cpu().hart_state().registers.read(12), VM_VALUE_B);
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(VM_LEAF_TABLE_1 + (((VM_VIRTUAL_ADDR >> 12) & 0x3ff) as u64) * 4)
+            .expect("global leaf pte should remain readable"),
+        sv32_leaf_pte(VM_PHYS_PAGE_B as u32, PTE_R | PTE_W | PTE_A | PTE_D)
+    );
+}
+
 fn setup_sv32_asid_switch_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -378,6 +407,70 @@ where
         .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
 }
 
+fn setup_sv32_global_asid_fence_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let leaf_pte_addr = VM_LEAF_TABLE_1 + (((VM_VIRTUAL_ADDR >> 12) & 0x3ff) as u64) * 4;
+    let global_flags = PTE_R | PTE_W | PTE_A | PTE_D | PTE_G;
+
+    write_word(machine, VM_PHYS_PAGE_A, VM_VALUE_A);
+    write_word(machine, VM_PHYS_PAGE_B, VM_VALUE_B);
+    install_sv32_mapping(
+        machine,
+        VM_ROOT_TABLE_1,
+        VM_LEAF_TABLE_1,
+        VM_VIRTUAL_ADDR,
+        VM_PHYS_PAGE_A as u32,
+        global_flags,
+    );
+    write_word(
+        machine,
+        VM_ROOT_TABLE_2 + (((VM_VIRTUAL_ADDR >> 22) & 0x3ff) as u64) * 4,
+        PTE_V | ((VM_LEAF_TABLE_1 as u32 >> PAGE_SHIFT) << 10),
+    );
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(1, VM_VIRTUAL_ADDR);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(2, sv32_satp_with_asid(VM_ROOT_TABLE_1, 1));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(3, sv32_satp_with_asid(VM_ROOT_TABLE_2, 2));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(4, leaf_pte_addr as u32);
+    machine.cpu_mut().hart_state_mut().registers.write(5, 2);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(6, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .registers
+        .write(7, 1 << MSTATUS_MPP_SHIFT);
+    machine.cpu_mut().hart_state_mut().registers.write(
+        8,
+        sv32_leaf_pte(VM_PHYS_PAGE_B as u32, PTE_R | PTE_W | PTE_A | PTE_D),
+    );
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
+}
+
 fn write_word<P>(machine: &mut Machine<P, MemoryMap>, addr: u64, value: u32)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -496,4 +589,14 @@ fn reference_core_runs_sv32_superpage_program() {
 #[test]
 fn pipeline_core_runs_sv32_superpage_program() {
     assert_sv32_superpage_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_sv32_global_asid_fence_program() {
+    assert_sv32_global_asid_fence_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_sv32_global_asid_fence_program() {
+    assert_sv32_global_asid_fence_program(PipelineCore::new);
 }

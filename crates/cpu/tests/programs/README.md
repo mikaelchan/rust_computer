@@ -25,6 +25,7 @@ Current checked-in examples now cover:
 - `Sv32` ASID namespace switching
 - pagetable remap visibility across `sfence.vma`
 - `Sv32` root-leaf superpage data access
+- `Sv32` global-mapping survival across ASID-specific `sfence.vma`
 
 ## Extension Notes
 
