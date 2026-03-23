@@ -1,0 +1,32 @@
+# Vectored machine software interrupt from the MSIP device.
+# Host setup preloads:
+# - MSIP pending in the machine software interrupt device
+# - mstatus.MIE and mie.MSIE enabled
+# - mtvec = 0x40 in vectored mode
+# Handler at 0x4c clears MSIP, records x10 = 3, and returns with mret.
+# Expect x10 = 3, mcause = interrupt 3, mepc = 0, pc = 0.
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x50000137
+0x00012023
+0x00300513
+0x30200073
+0x00000013
+0x00000013

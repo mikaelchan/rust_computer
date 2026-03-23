@@ -1,0 +1,24 @@
+# WFI halts until a machine software interrupt wakes the hart.
+# Host setup preloads:
+# - mstatus.MIE and mie.MSIE enabled
+# - mtvec = 0x20
+# Test flow:
+# - mainline executes wfi and halts at PC 0x4
+# - host raises MSIP after the halt is observed
+# - machine handler clears MSIP, records x10 = 7, and returns
+# - mainline resumes at PC 0x4, writes x1 = 1, and loops
+# Expect x1 = 1, x10 = 7, mcause = interrupt 3, mepc = 0x4, pc = 0x8.
+0x10500073
+0x00100093
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x50000137
+0x00012023
+0x00700513
+0x30200073
+0x00000013
+0x00000013

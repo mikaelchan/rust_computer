@@ -1,0 +1,32 @@
+# Vectored delegated supervisor external interrupt from the controller.
+# Host setup preloads:
+# - privilege = User
+# - controller source 1 enabled, routed to supervisor, and pending
+# - mideleg/sie enable supervisor external interrupts
+# - stvec = 0x20 in vectored mode
+# Handler at 0x44 claims and completes source 1, records x10 = 9, and returns with sret.
+# Expect x10 = 9, scause = interrupt 9, sepc = 0, privilege = User, pc = 0.
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x40000137
+0x00c12183
+0x00312623
+0x00900513
+0x10200073
+0x00000013
+0x00000013

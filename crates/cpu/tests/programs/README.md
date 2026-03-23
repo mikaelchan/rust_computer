@@ -22,6 +22,9 @@ Current checked-in examples now cover:
 - simple load/store behavior
 - simple counted control flow
 - machine software interrupt delivery
+- `wfi` sleep and wakeup on machine software interrupt
+- vectored machine software interrupt entry through `mtvec`
+- vectored delegated supervisor external interrupt entry through `stvec`
 - machine software interrupt delivery raised by a `mip` CSR write
 - delegated supervisor software interrupt delivery raised by a `sip` CSR write
 - machine timer interrupt delivery from the memory-mapped timer device
