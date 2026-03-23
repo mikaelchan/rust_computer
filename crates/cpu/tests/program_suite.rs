@@ -60,6 +60,10 @@ const VECTORED_MACHINE_SOFTWARE_INTERRUPT_PROGRAM: &str =
     include_str!("programs/vectored_machine_software_interrupt.hex");
 const VECTORED_SUPERVISOR_EXTERNAL_INTERRUPT_PROGRAM: &str =
     include_str!("programs/vectored_supervisor_external_interrupt.hex");
+const MACHINE_EXTERNAL_INTERRUPT_PROGRAM: &str =
+    include_str!("programs/machine_external_interrupt.hex");
+const MACHINE_INTERRUPT_PRIORITY_PROGRAM: &str =
+    include_str!("programs/machine_interrupt_priority.hex");
 const CSR_MIP_MACHINE_SOFTWARE_INTERRUPT_PROGRAM: &str =
     include_str!("programs/csr_mip_machine_software_interrupt.hex");
 const CSR_SIP_SUPERVISOR_SOFTWARE_INTERRUPT_PROGRAM: &str =
@@ -392,6 +396,94 @@ where
     assert!(matches!(
         machine.cpu().hart_state().privilege,
         PrivilegeMode::User
+    ));
+}
+
+fn assert_machine_external_interrupt_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        MACHINE_EXTERNAL_INTERRUPT_PROGRAM,
+        RAM_BYTES,
+        setup_machine_external_interrupt_state,
+    );
+
+    step_until(&mut machine, 40, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 5
+            && machine.cpu().hart_state().registers.read(10) == 2
+            && machine.cpu().hart_state().pc == 0x4
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 5);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 2);
+    assert_eq!(machine.cpu().hart_state().pc, 0x4);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mepc), 0x0);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mcause),
+        0x8000_000b
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(CONTROLLER_BASE)
+            .expect("controller pending register should remain readable"),
+        0
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Machine
+    ));
+}
+
+fn assert_machine_interrupt_priority_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with_map(
+        make_cpu(RESET_VECTOR),
+        MACHINE_INTERRUPT_PRIORITY_PROGRAM,
+        RAM_BYTES,
+        install_machine_timer_device,
+        setup_machine_interrupt_priority_state,
+    );
+
+    step_until(&mut machine, 48, |machine| {
+        machine.cpu().hart_state().registers.read(10) == 11 && machine.cpu().hart_state().pc == 0x0
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 11);
+    assert_eq!(machine.cpu().hart_state().pc, 0x0);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mepc), 0x0);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mcause),
+        0x8000_000b
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(CONTROLLER_BASE)
+            .expect("controller pending register should remain readable"),
+        0
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(MSIP_BASE)
+            .expect("MSIP register should remain readable"),
+        0
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(TIMER_BASE + 8)
+            .expect("mtimecmp low should remain readable"),
+        256
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Machine
     ));
 }
 
@@ -1598,6 +1690,76 @@ where
         .write(CsrAddress::Stvec, 0x20 | 0b01);
 }
 
+fn setup_machine_external_interrupt_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine
+        .bus_mut()
+        .store32(CONTROLLER_BASE + 4, 1)
+        .expect("controller enable register should write during setup");
+    machine
+        .bus_mut()
+        .store32(CONTROLLER_BASE + 8, 1)
+        .expect("controller pending register should write during setup");
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, 1 << 3);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mie, 1 << 11);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20);
+}
+
+fn setup_machine_interrupt_priority_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine
+        .bus_mut()
+        .store32(CONTROLLER_BASE + 4, 1)
+        .expect("controller enable register should write during setup");
+    machine
+        .bus_mut()
+        .store32(CONTROLLER_BASE + 8, 1)
+        .expect("controller pending register should write during setup");
+    machine
+        .bus_mut()
+        .store32(MSIP_BASE, 1)
+        .expect("MSIP register should write during setup");
+    machine
+        .bus_mut()
+        .store32(TIMER_BASE + 8, 1)
+        .expect("mtimecmp low should write during setup");
+    machine
+        .bus_mut()
+        .store32(TIMER_BASE + 12, 0)
+        .expect("mtimecmp high should write during setup");
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, 1 << 3);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mie, (1 << 3) | (1 << 7) | (1 << 11));
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20);
+}
+
 fn setup_csr_sip_supervisor_software_interrupt_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -2532,6 +2694,26 @@ fn reference_core_runs_vectored_supervisor_external_interrupt_program() {
 #[test]
 fn pipeline_core_runs_vectored_supervisor_external_interrupt_program() {
     assert_vectored_supervisor_external_interrupt_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_machine_external_interrupt_program() {
+    assert_machine_external_interrupt_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_machine_external_interrupt_program() {
+    assert_machine_external_interrupt_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_machine_interrupt_priority_program() {
+    assert_machine_interrupt_priority_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_machine_interrupt_priority_program() {
+    assert_machine_interrupt_priority_program(PipelineCore::new);
 }
 
 #[test]

@@ -25,6 +25,8 @@ Current checked-in examples now cover:
 - `wfi` sleep and wakeup on machine software interrupt
 - vectored machine software interrupt entry through `mtvec`
 - vectored delegated supervisor external interrupt entry through `stvec`
+- machine external interrupt delivery from the controller
+- machine interrupt priority choosing external over software and timer
 - machine software interrupt delivery raised by a `mip` CSR write
 - delegated supervisor software interrupt delivery raised by a `sip` CSR write
 - machine timer interrupt delivery from the memory-mapped timer device

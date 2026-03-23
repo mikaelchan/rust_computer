@@ -1,0 +1,23 @@
+# Machine external interrupt from the interrupt controller.
+# Host setup preloads:
+# - controller source 1 enabled and pending
+# - mstatus.MIE and mie.MEIE enabled
+# - mtvec = 0x20
+# Handler claims and completes source 1, records x10 = 2, and returns with mret.
+# Mainline resumes at PC 0, writes x1 = 5, then spins at PC 0x4.
+# Expect x1 = 5, x10 = 2, mcause = interrupt 11, mepc = 0, pc = 0x4.
+0x00500093
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x40000137
+0x00c12183
+0x00312623
+0x00200513
+0x30200073
+0x00000013
+0x00000013
