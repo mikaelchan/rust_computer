@@ -24,6 +24,8 @@ const SATP_MODE_SV32: u32 = 1 << 31;
 const MSTATUS_MPRV: u32 = 1 << 17;
 const MSTATUS_MPP_SHIFT: u32 = 11;
 const MSTATUS_TVM: u32 = 1 << 20;
+const MSTATUS_TW: u32 = 1 << 21;
+const MSTATUS_TSR: u32 = 1 << 22;
 const PTE_V: u32 = 1 << 0;
 const PTE_R: u32 = 1 << 1;
 const PTE_W: u32 = 1 << 2;
@@ -66,6 +68,11 @@ const DELEGATED_ILLEGAL_INSTRUCTION_PROGRAM: &str =
     include_str!("programs/delegated_illegal_instruction.hex");
 const SUPERVISOR_TVM_SATP_TRAP_PROGRAM: &str =
     include_str!("programs/supervisor_tvm_satp_trap.hex");
+const SUPERVISOR_TVM_SFENCE_TRAP_PROGRAM: &str =
+    include_str!("programs/supervisor_tvm_sfence_trap.hex");
+const SUPERVISOR_TSR_SRET_TRAP_PROGRAM: &str =
+    include_str!("programs/supervisor_tsr_sret_trap.hex");
+const SUPERVISOR_TW_WFI_TRAP_PROGRAM: &str = include_str!("programs/supervisor_tw_wfi_trap.hex");
 
 fn parse_program_image(source: &str) -> Vec<u32> {
     source
@@ -705,6 +712,130 @@ where
     ));
 }
 
+fn assert_supervisor_tvm_sfence_trap_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    const SUPERVISOR_SFENCE_VMA: u32 = 0x1200_0073;
+
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SUPERVISOR_TVM_SFENCE_TRAP_PROGRAM,
+        RAM_BYTES,
+        setup_supervisor_tvm_sfence_trap_state,
+    );
+
+    step_until(&mut machine, 40, |machine| {
+        machine.cpu().hart_state().registers.read(13) == 1
+            && machine.cpu().hart_state().pc == 0x8
+            && matches!(
+                machine.cpu().hart_state().privilege,
+                PrivilegeMode::Supervisor
+            )
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), 2);
+    assert_eq!(
+        machine.cpu().hart_state().registers.read(12),
+        SUPERVISOR_SFENCE_VMA
+    );
+    assert_eq!(machine.cpu().hart_state().registers.read(13), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mcause), 2);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mtval),
+        SUPERVISOR_SFENCE_VMA
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Supervisor
+    ));
+}
+
+fn assert_supervisor_tsr_sret_trap_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    const SUPERVISOR_SRET: u32 = 0x1020_0073;
+
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SUPERVISOR_TSR_SRET_TRAP_PROGRAM,
+        RAM_BYTES,
+        setup_supervisor_tsr_sret_trap_state,
+    );
+
+    step_until(&mut machine, 40, |machine| {
+        machine.cpu().hart_state().registers.read(13) == 1
+            && machine.cpu().hart_state().pc == 0x8
+            && matches!(
+                machine.cpu().hart_state().privilege,
+                PrivilegeMode::Supervisor
+            )
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), 2);
+    assert_eq!(
+        machine.cpu().hart_state().registers.read(12),
+        SUPERVISOR_SRET
+    );
+    assert_eq!(machine.cpu().hart_state().registers.read(13), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mcause), 2);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mtval),
+        SUPERVISOR_SRET
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Supervisor
+    ));
+}
+
+fn assert_supervisor_tw_wfi_trap_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    const SUPERVISOR_WFI: u32 = 0x1050_0073;
+
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SUPERVISOR_TW_WFI_TRAP_PROGRAM,
+        RAM_BYTES,
+        setup_supervisor_tw_wfi_trap_state,
+    );
+
+    step_until(&mut machine, 40, |machine| {
+        machine.cpu().hart_state().registers.read(13) == 1
+            && machine.cpu().hart_state().pc == 0x8
+            && matches!(
+                machine.cpu().hart_state().privilege,
+                PrivilegeMode::Supervisor
+            )
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), 2);
+    assert_eq!(
+        machine.cpu().hart_state().registers.read(12),
+        SUPERVISOR_WFI
+    );
+    assert_eq!(machine.cpu().hart_state().registers.read(13), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mcause), 2);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mtval),
+        SUPERVISOR_WFI
+    );
+    assert!(!machine.cpu().hart_state().halted);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Supervisor
+    ));
+}
+
 fn setup_sv32_asid_switch_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -1149,6 +1280,62 @@ where
         .write(CsrAddress::Mstatus, MSTATUS_TVM);
 }
 
+fn setup_supervisor_tvm_sfence_trap_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, MSTATUS_TVM);
+}
+
+fn setup_supervisor_tsr_sret_trap_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, MSTATUS_TSR);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Sepc, 0x40);
+}
+
+fn setup_supervisor_tw_wfi_trap_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, MSTATUS_TW);
+}
+
 fn write_word<P>(machine: &mut Machine<P, MemoryMap>, addr: u64, value: u32)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -1367,4 +1554,34 @@ fn reference_core_runs_supervisor_tvm_satp_trap_program() {
 #[test]
 fn pipeline_core_runs_supervisor_tvm_satp_trap_program() {
     assert_supervisor_tvm_satp_trap_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_supervisor_tvm_sfence_trap_program() {
+    assert_supervisor_tvm_sfence_trap_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_supervisor_tvm_sfence_trap_program() {
+    assert_supervisor_tvm_sfence_trap_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_supervisor_tsr_sret_trap_program() {
+    assert_supervisor_tsr_sret_trap_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_supervisor_tsr_sret_trap_program() {
+    assert_supervisor_tsr_sret_trap_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_supervisor_tw_wfi_trap_program() {
+    assert_supervisor_tw_wfi_trap_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_supervisor_tw_wfi_trap_program() {
+    assert_supervisor_tw_wfi_trap_program(PipelineCore::new);
 }

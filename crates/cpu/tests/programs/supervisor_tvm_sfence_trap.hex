@@ -1,0 +1,25 @@
+# Supervisor sfence.vma trapped by mstatus.TVM, with mret return.
+# Host setup preloads:
+# - privilege = Supervisor
+# - mtvec = 0x20
+# - mstatus.TVM set
+# Mainline executes a forbidden sfence.vma, the machine handler records
+# mcause/mtval, skips the faulting instruction by advancing mepc,
+# returns with mret, and supervisor code resumes at PC 0x4.
+# Expect x10 = 1, x11 = 2, x12 = faulting instruction, x13 = 1.
+0x12000073
+0x00168693
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00150513
+0x342025f3
+0x34302673
+0x34102773
+0x00470713
+0x34171073
+0x30200073
+0x00000013

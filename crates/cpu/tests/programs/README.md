@@ -30,6 +30,9 @@ Current checked-in examples now cover:
 - machine `ecall` delivery into a machine handler with `mret` return
 - delegated user-ecall delivery into a supervisor handler with `sret` return
 - supervisor `satp` access trapped by `mstatus.TVM` with `mret` return
+- supervisor `sfence.vma` trapped by `mstatus.TVM` with `mret` return
+- supervisor `sret` trapped by `mstatus.TSR` with `mret` return
+- supervisor `wfi` trapped by `mstatus.TW` with `mret` return
 - `Sv32` ASID namespace switching
 - pagetable remap visibility across `sfence.vma`
 - `Sv32` root-leaf superpage data access
