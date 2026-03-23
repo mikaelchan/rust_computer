@@ -1,5 +1,7 @@
 use rvsim_cpu::{CpuError, CpuModel, PipelineCore, PrivilegeMode, ReferenceCore};
-use rvsim_devices::{MachineSoftwareInterrupt, Ram, Rom, SupervisorSoftwareInterrupt};
+use rvsim_devices::{
+    InterruptController, MachineSoftwareInterrupt, Ram, Rom, SupervisorSoftwareInterrupt,
+};
 use rvsim_isa::CsrAddress;
 use rvsim_system::{Bus, Machine, MemoryMap, Processor};
 
@@ -7,6 +9,7 @@ const RESET_VECTOR: u32 = 0;
 const RAM_BASE: u64 = 0x1000_0000;
 const RAM_BYTES: usize = 0x1000;
 const VM_RAM_BYTES: usize = 0x8000;
+const CONTROLLER_BASE: u64 = 0x4000_0000;
 const MSIP_BASE: u64 = 0x5000_0000;
 const SSIP_BASE: u64 = 0x6000_0000;
 const PAGE_SHIFT: u32 = 12;
@@ -46,6 +49,8 @@ const DELEGATED_USER_ECALL_PROGRAM: &str = include_str!("programs/delegated_user
 const MACHINE_ECALL_RETURN_PROGRAM: &str = include_str!("programs/machine_ecall_return.hex");
 const DELEGATED_SSIP_INTERRUPT_PROGRAM: &str =
     include_str!("programs/delegated_ssip_interrupt.hex");
+const DELEGATED_EXTERNAL_INTERRUPT_PROGRAM: &str =
+    include_str!("programs/delegated_external_interrupt.hex");
 
 fn parse_program_image(source: &str) -> Vec<u32> {
     source
@@ -89,6 +94,9 @@ where
     memory
         .map_device(Ram::new(RAM_BASE, ram_bytes))
         .expect("RAM should map");
+    memory
+        .map_device(InterruptController::new(CONTROLLER_BASE))
+        .expect("interrupt controller should map");
     memory
         .map_device(MachineSoftwareInterrupt::new(MSIP_BASE))
         .expect("MSIP device should map");
@@ -408,6 +416,45 @@ where
     );
 }
 
+fn assert_delegated_external_interrupt_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        DELEGATED_EXTERNAL_INTERRUPT_PROGRAM,
+        RAM_BYTES,
+        setup_delegated_external_interrupt_state,
+    );
+
+    step_until(&mut machine, 40, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 5
+            && machine.cpu().hart_state().registers.read(10) == 5
+            && machine.cpu().hart_state().pc == 0x4
+            && matches!(machine.cpu().hart_state().privilege, PrivilegeMode::User)
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 5);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 5);
+    assert_eq!(machine.cpu().hart_state().pc, 0x4);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Scause),
+        0x8000_0009
+    );
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Sepc), 0);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::User
+    ));
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(CONTROLLER_BASE)
+            .expect("controller pending register should remain readable"),
+        0
+    );
+}
+
 fn setup_sv32_asid_switch_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -691,6 +738,40 @@ where
         .write(CsrAddress::Stvec, 0x20);
 }
 
+fn setup_delegated_external_interrupt_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine
+        .bus_mut()
+        .store32(CONTROLLER_BASE + 4, 1)
+        .expect("controller enable register should write during setup");
+    machine
+        .bus_mut()
+        .store32(CONTROLLER_BASE + 16, 1)
+        .expect("controller route register should write during setup");
+    machine
+        .bus_mut()
+        .store32(CONTROLLER_BASE + 8, 1)
+        .expect("controller pending register should write during setup");
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::User;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mideleg, 1 << 9);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Sie, 1 << 9);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Stvec, 0x20);
+}
+
 fn write_word<P>(machine: &mut Machine<P, MemoryMap>, addr: u64, value: u32)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -859,4 +940,14 @@ fn reference_core_runs_delegated_ssip_interrupt_program() {
 #[test]
 fn pipeline_core_runs_delegated_ssip_interrupt_program() {
     assert_delegated_ssip_interrupt_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_delegated_external_interrupt_program() {
+    assert_delegated_external_interrupt_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_delegated_external_interrupt_program() {
+    assert_delegated_external_interrupt_program(PipelineCore::new);
 }
