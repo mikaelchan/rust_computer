@@ -1,0 +1,20 @@
+# Machine ecall trap and mret return smoke test.
+# Host setup preloads:
+# - mtvec = 0x20
+# Program flow:
+# - machine mode executes ecall at PC 0
+# - machine trap handler writes mepc = 4, records a handler-side marker in x2,
+#   returns with mret, and mainline resumes at PC 4
+# Expect x1 = 1, x2 = 9, mcause = 11, mepc = 4, privilege = Machine, pc = 0x8.
+0x00000073
+0x00100093
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x34125073
+0x00900113
+0x30200073
+0x0000006f

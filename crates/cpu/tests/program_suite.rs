@@ -1,4 +1,4 @@
-use rvsim_cpu::{CpuError, CpuModel, PipelineCore, ReferenceCore};
+use rvsim_cpu::{CpuError, CpuModel, PipelineCore, PrivilegeMode, ReferenceCore};
 use rvsim_devices::{MachineSoftwareInterrupt, Ram, Rom};
 use rvsim_isa::CsrAddress;
 use rvsim_system::{Bus, Machine, MemoryMap, Processor};
@@ -41,6 +41,8 @@ const SV32_SFENCE_REMAP_PROGRAM: &str = include_str!("programs/sv32_sfence_remap
 const SV32_SUPERPAGE_PROGRAM: &str = include_str!("programs/sv32_superpage.hex");
 const SV32_GLOBAL_ASID_FENCE_PROGRAM: &str = include_str!("programs/sv32_global_asid_fence.hex");
 const SV32_SUM_FAULT_PROGRAM: &str = include_str!("programs/sv32_sum_fault.hex");
+const DELEGATED_USER_ECALL_PROGRAM: &str = include_str!("programs/delegated_user_ecall.hex");
+const MACHINE_ECALL_RETURN_PROGRAM: &str = include_str!("programs/machine_ecall_return.hex");
 
 fn parse_program_image(source: &str) -> Vec<u32> {
     source
@@ -303,6 +305,64 @@ where
     assert_eq!(machine.cpu().hart_state().registers.read(13), 1);
 }
 
+fn assert_delegated_user_ecall_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        DELEGATED_USER_ECALL_PROGRAM,
+        RAM_BYTES,
+        setup_delegated_user_ecall_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 1
+            && machine.cpu().hart_state().registers.read(2) == 7
+            && machine.cpu().hart_state().pc == 0x8
+            && matches!(machine.cpu().hart_state().privilege, PrivilegeMode::User)
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(2), 7);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Scause), 8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Sepc), 4);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::User
+    ));
+}
+
+fn assert_machine_ecall_return_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        MACHINE_ECALL_RETURN_PROGRAM,
+        RAM_BYTES,
+        setup_machine_ecall_return_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 1
+            && machine.cpu().hart_state().registers.read(2) == 9
+            && machine.cpu().hart_state().pc == 0x8
+            && matches!(machine.cpu().hart_state().privilege, PrivilegeMode::Machine)
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(2), 9);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mcause), 11);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mepc), 4);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Machine
+    ));
+}
+
 fn setup_sv32_asid_switch_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -532,6 +592,34 @@ where
         .write(CsrAddress::Mstatus, MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT));
 }
 
+fn setup_delegated_user_ecall_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::User;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Medeleg, 1 << 8);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Stvec, 0x20);
+}
+
+fn setup_machine_ecall_return_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20);
+}
+
 fn write_word<P>(machine: &mut Machine<P, MemoryMap>, addr: u64, value: u32)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -670,4 +758,24 @@ fn reference_core_runs_sv32_sum_fault_program() {
 #[test]
 fn pipeline_core_runs_sv32_sum_fault_program() {
     assert_sv32_sum_fault_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_delegated_user_ecall_program() {
+    assert_delegated_user_ecall_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_delegated_user_ecall_program() {
+    assert_delegated_user_ecall_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_machine_ecall_return_program() {
+    assert_machine_ecall_return_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_machine_ecall_return_program() {
+    assert_machine_ecall_return_program(PipelineCore::new);
 }

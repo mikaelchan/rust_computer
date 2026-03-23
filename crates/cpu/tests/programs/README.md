@@ -22,6 +22,8 @@ Current checked-in examples now cover:
 - simple load/store behavior
 - simple counted control flow
 - machine software interrupt delivery
+- machine `ecall` delivery into a machine handler with `mret` return
+- delegated user-ecall delivery into a supervisor handler with `sret` return
 - `Sv32` ASID namespace switching
 - pagetable remap visibility across `sfence.vma`
 - `Sv32` root-leaf superpage data access
