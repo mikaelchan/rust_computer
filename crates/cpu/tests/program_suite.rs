@@ -23,6 +23,7 @@ const PAGE_SHIFT: u32 = 12;
 const SATP_MODE_SV32: u32 = 1 << 31;
 const MSTATUS_MPRV: u32 = 1 << 17;
 const MSTATUS_MPP_SHIFT: u32 = 11;
+const MSTATUS_TVM: u32 = 1 << 20;
 const PTE_V: u32 = 1 << 0;
 const PTE_R: u32 = 1 << 1;
 const PTE_W: u32 = 1 << 2;
@@ -61,6 +62,10 @@ const DELEGATED_EXTERNAL_INTERRUPT_PROGRAM: &str =
 const DELEGATED_BLOCK_INTERRUPT_PROGRAM: &str =
     include_str!("programs/delegated_block_interrupt.hex");
 const DELEGATED_DMA_INTERRUPT_PROGRAM: &str = include_str!("programs/delegated_dma_interrupt.hex");
+const DELEGATED_ILLEGAL_INSTRUCTION_PROGRAM: &str =
+    include_str!("programs/delegated_illegal_instruction.hex");
+const SUPERVISOR_TVM_SATP_TRAP_PROGRAM: &str =
+    include_str!("programs/supervisor_tvm_satp_trap.hex");
 
 fn parse_program_image(source: &str) -> Vec<u32> {
     source
@@ -618,6 +623,88 @@ where
     );
 }
 
+fn assert_delegated_illegal_instruction_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    const ILLEGAL_MSTATUS_CSRRWI: u32 = 0x3000_d0f3;
+
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        DELEGATED_ILLEGAL_INSTRUCTION_PROGRAM,
+        RAM_BYTES,
+        setup_delegated_illegal_instruction_state,
+    );
+
+    step_until(&mut machine, 40, |machine| {
+        machine.cpu().hart_state().registers.read(13) == 1
+            && machine.cpu().hart_state().pc == 0x8
+            && matches!(machine.cpu().hart_state().privilege, PrivilegeMode::User)
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 0);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), 2);
+    assert_eq!(
+        machine.cpu().hart_state().registers.read(12),
+        ILLEGAL_MSTATUS_CSRRWI
+    );
+    assert_eq!(machine.cpu().hart_state().registers.read(13), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Scause), 2);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Stval),
+        ILLEGAL_MSTATUS_CSRRWI
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::User
+    ));
+}
+
+fn assert_supervisor_tvm_satp_trap_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    const SUPERVISOR_SATP_CSRRW: u32 = 0x1800_10f3;
+
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SUPERVISOR_TVM_SATP_TRAP_PROGRAM,
+        RAM_BYTES,
+        setup_supervisor_tvm_satp_trap_state,
+    );
+
+    step_until(&mut machine, 40, |machine| {
+        machine.cpu().hart_state().registers.read(13) == 1
+            && machine.cpu().hart_state().pc == 0x8
+            && matches!(
+                machine.cpu().hart_state().privilege,
+                PrivilegeMode::Supervisor
+            )
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 0);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), 2);
+    assert_eq!(
+        machine.cpu().hart_state().registers.read(12),
+        SUPERVISOR_SATP_CSRRW
+    );
+    assert_eq!(machine.cpu().hart_state().registers.read(13), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mcause), 2);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mtval),
+        SUPERVISOR_SATP_CSRRW
+    );
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Satp), 0);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Supervisor
+    ));
+}
+
 fn setup_sv32_asid_switch_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -1028,6 +1115,40 @@ where
         .write(CsrAddress::Stvec, 0x40);
 }
 
+fn setup_delegated_illegal_instruction_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::User;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Medeleg, 1 << 2);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Stvec, 0x20);
+}
+
+fn setup_supervisor_tvm_satp_trap_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mstatus, MSTATUS_TVM);
+}
+
 fn write_word<P>(machine: &mut Machine<P, MemoryMap>, addr: u64, value: u32)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -1226,4 +1347,24 @@ fn reference_core_runs_delegated_dma_interrupt_program() {
 #[test]
 fn pipeline_core_runs_delegated_dma_interrupt_program() {
     assert_delegated_dma_interrupt_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_delegated_illegal_instruction_program() {
+    assert_delegated_illegal_instruction_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_delegated_illegal_instruction_program() {
+    assert_delegated_illegal_instruction_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_supervisor_tvm_satp_trap_program() {
+    assert_supervisor_tvm_satp_trap_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_supervisor_tvm_satp_trap_program() {
+    assert_supervisor_tvm_satp_trap_program(PipelineCore::new);
 }

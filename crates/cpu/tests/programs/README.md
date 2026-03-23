@@ -26,8 +26,10 @@ Current checked-in examples now cover:
 - delegated supervisor external interrupt delivery with controller claim/complete
 - delegated supervisor external interrupt delivery from block-device completion
 - delegated supervisor external interrupt delivery from DMA completion
+- delegated user illegal-instruction delivery into a supervisor handler with `sret` return
 - machine `ecall` delivery into a machine handler with `mret` return
 - delegated user-ecall delivery into a supervisor handler with `sret` return
+- supervisor `satp` access trapped by `mstatus.TVM` with `mret` return
 - `Sv32` ASID namespace switching
 - pagetable remap visibility across `sfence.vma`
 - `Sv32` root-leaf superpage data access

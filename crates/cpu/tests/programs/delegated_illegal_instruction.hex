@@ -1,0 +1,25 @@
+# Delegated user illegal-instruction trap with sret return.
+# Host setup preloads:
+# - privilege = User
+# - medeleg bit 2 so illegal instruction traps to Supervisor
+# - stvec = 0x20
+# Mainline executes an illegal machine-CSR access, the supervisor handler
+# records scause/stval, skips the faulting instruction by advancing sepc,
+# returns with sret, and user code resumes at PC 0x4.
+# Expect x1 = 0, x10 = 1, x11 = 2, x12 = faulting instruction, x13 = 1.
+0x3000d0f3
+0x00168693
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00150513
+0x142025f3
+0x14302673
+0x14102773
+0x00470713
+0x14171073
+0x10200073
+0x00000013

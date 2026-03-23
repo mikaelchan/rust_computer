@@ -1,0 +1,25 @@
+# Supervisor satp access trapped by mstatus.TVM, with mret return.
+# Host setup preloads:
+# - privilege = Supervisor
+# - mtvec = 0x20
+# - mstatus.TVM set
+# Mainline executes a forbidden satp CSR access, the machine handler records
+# mcause/mtval, skips the faulting instruction by advancing mepc,
+# returns with mret, and supervisor code resumes at PC 0x4.
+# Expect x1 = 0, x10 = 1, x11 = 2, x12 = faulting instruction, x13 = 1.
+0x180010f3
+0x00168693
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00150513
+0x342025f3
+0x34302673
+0x34102773
+0x00470713
+0x34171073
+0x30200073
+0x00000013
