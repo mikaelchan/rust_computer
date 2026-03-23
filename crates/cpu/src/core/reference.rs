@@ -72,6 +72,7 @@ impl Processor for ReferenceCore {
     fn step_cycle(&mut self, bus: &mut dyn Bus) -> Result<CpuCycle, Self::Error> {
         self.cycle += 1;
         self.state.csrs.increment_cycle();
+        self.state.csrs.increment_time();
         self.state.csrs.sync_interrupts(bus.pending_interrupts());
 
         if self.pending_decoded.is_none()
