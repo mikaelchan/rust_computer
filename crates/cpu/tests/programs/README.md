@@ -42,6 +42,7 @@ Current checked-in examples now cover:
 - `Sv32` root-leaf superpage instruction fetch plus data access through one mapping
 - `satp` ASID-namespace reuse that keeps a stale translation until `sfence.vma`
 - machine-mode writes and reads of the high-half `mcycleh` CSR
+- supervisor `instret` access with enabled `mcounteren`
 - user `cycleh` access with enabled counter delegation
 - user `timeh` access sourced from the machine timer with enabled counter delegation
 - user `instret` access with enabled counter delegation
@@ -59,6 +60,7 @@ Current checked-in examples now cover:
 - supervisor `sfence.vma` trapped by `mstatus.TVM` with `mret` return
 - supervisor `sret` trapped by `mstatus.TSR` with `mret` return
 - supervisor `wfi` trapped by `mstatus.TW` with `mret` return
+- supervisor `time` access trapped by missing `mcounteren` with `mret` return
 - user machine-CSR access trapped by machine mode with `mret` return
 - user `time` access trapped by missing `scounteren` with `mret` return
 - user `instret` access trapped by missing `scounteren` with `mret` return
