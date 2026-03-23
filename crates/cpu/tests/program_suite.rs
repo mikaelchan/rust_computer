@@ -60,6 +60,8 @@ const CSR_MIP_MACHINE_SOFTWARE_INTERRUPT_PROGRAM: &str =
 const CSR_SIP_SUPERVISOR_SOFTWARE_INTERRUPT_PROGRAM: &str =
     include_str!("programs/csr_sip_supervisor_software_interrupt.hex");
 const MACHINE_TIMER_INTERRUPT_PROGRAM: &str = include_str!("programs/machine_timer_interrupt.hex");
+const MACHINE_PREEMPTS_SUPERVISOR_HANDLER_PROGRAM: &str =
+    include_str!("programs/machine_preempts_supervisor_handler.hex");
 const SV32_ASID_SWITCH_PROGRAM: &str = include_str!("programs/sv32_asid_switch.hex");
 const SV32_SFENCE_REMAP_PROGRAM: &str = include_str!("programs/sv32_sfence_remap.hex");
 const SV32_SUPERPAGE_PROGRAM: &str = include_str!("programs/sv32_superpage.hex");
@@ -370,6 +372,54 @@ where
             .expect("mtimecmp high should remain readable"),
         0
     );
+}
+
+fn assert_machine_preempts_supervisor_handler_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        MACHINE_PREEMPTS_SUPERVISOR_HANDLER_PROGRAM,
+        RAM_BYTES,
+        setup_machine_preempts_supervisor_handler_state,
+    );
+
+    step_until(&mut machine, 64, |machine| {
+        machine.cpu().hart_state().registers.read(1) == 1 && machine.cpu().hart_state().pc == 0x4
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 10);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), 11);
+    assert_eq!(machine.cpu().hart_state().registers.read(12), 12);
+    assert_eq!(machine.cpu().hart_state().pc, 0x4);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Scause),
+        0x8000_0009
+    );
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mcause),
+        0x8000_0003
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(CONTROLLER_BASE)
+            .expect("controller pending register should remain readable"),
+        0
+    );
+    assert_eq!(
+        machine
+            .bus_mut()
+            .load32(MSIP_BASE)
+            .expect("MSIP register should remain readable"),
+        0
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::User
+    ));
 }
 
 fn assert_sv32_asid_switch_program<P>(make_cpu: fn(u32) -> P)
@@ -1314,6 +1364,50 @@ where
         .write(CsrAddress::Mtvec, 0x20);
 }
 
+fn setup_machine_preempts_supervisor_handler_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine
+        .bus_mut()
+        .store32(CONTROLLER_BASE + 4, 1)
+        .expect("controller enable register should write during setup");
+    machine
+        .bus_mut()
+        .store32(CONTROLLER_BASE + 16, 1)
+        .expect("controller route register should write during setup");
+    machine
+        .bus_mut()
+        .store32(CONTROLLER_BASE + 8, 1)
+        .expect("controller pending register should write during setup");
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::User;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mideleg, 1 << 9);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mie, 1 << 3);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Sie, 1 << 9);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Stvec, 0x20);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x60);
+}
+
 fn setup_sv32_sfence_remap_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -2074,6 +2168,16 @@ fn reference_core_runs_machine_timer_interrupt_program() {
 #[test]
 fn pipeline_core_runs_machine_timer_interrupt_program() {
     assert_machine_timer_interrupt_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_machine_preempts_supervisor_handler_program() {
+    assert_machine_preempts_supervisor_handler_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_machine_preempts_supervisor_handler_program() {
+    assert_machine_preempts_supervisor_handler_program(PipelineCore::new);
 }
 
 #[test]

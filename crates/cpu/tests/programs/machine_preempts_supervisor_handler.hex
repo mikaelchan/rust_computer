@@ -1,0 +1,43 @@
+# Machine software interrupt preempts a delegated supervisor external handler.
+# Host setup preloads:
+# - privilege = User
+# - controller source 1 enabled, routed to supervisor, and pending
+# - mideleg enables supervisor external interrupts
+# - mie enables machine software interrupts
+# - sie enables supervisor external interrupts
+# - stvec = 0x20, mtvec = 0x60
+# User mainline is interrupted into a supervisor handler. That handler claims and
+# completes the controller source, records x10 = 10, raises MSIP through MMIO,
+# then later resumes to record x11 = 11 and return with sret. The machine
+# handler clears MSIP, records x12 = 12, and returns with mret.
+# Expect x1 = 1, x10 = 10, x11 = 11, x12 = 12, privilege = User, pc = 0x4.
+0x00100093
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x40000137
+0x00c12203
+0x00412623
+0x00a00513
+0x500001b7
+0x00100293
+0x0051a023
+0x00b00593
+0x10200073
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x500001b7
+0x0001a023
+0x00c00613
+0x30200073
+0x00000013
+0x00000013
