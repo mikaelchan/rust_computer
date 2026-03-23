@@ -1,0 +1,17 @@
+# Sv32 malformed non-leaf PTE regression.
+# Host setup preloads:
+# - satp = active Sv32 root
+# - mstatus = MPRV with MPP=Supervisor
+# - the root PTE for virtual address 0x8000 is a non-leaf pointer with reserved A-bit set
+# Program forms virtual address 0x8000, attempts a translated load, and should trap.
+# The machine trap handler at mtvec = 0x20 sets x10 = 1 before spinning.
+0x000080b7
+0x0000a103
+0x0000006f
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00100513
+0x0000006f

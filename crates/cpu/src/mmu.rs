@@ -29,6 +29,7 @@ const PTE_A: u32 = 1 << 6;
 const PTE_D: u32 = 1 << 7;
 const PTE_PPN_MASK: u32 = (1 << 22) - 1;
 const PTE_PPN0_MASK: u32 = (1 << 10) - 1;
+const NONLEAF_RESERVED_MASK: u32 = PTE_U | PTE_A | PTE_D;
 const TLB_ENTRY_COUNT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +268,15 @@ impl PageWalker {
             });
         }
 
+        if !nonleaf_flags_valid(flags) {
+            self.active = None;
+            return Ok(if drain_only {
+                StepResult::Drained
+            } else {
+                StepResult::Fault(page_fault(state.request))
+            });
+        }
+
         if state.level == 0 {
             self.active = None;
             return Ok(if drain_only {
@@ -489,6 +499,10 @@ const fn pte_ppn(pte: u32) -> u32 {
 
 const fn pte_is_global(flags: u32) -> bool {
     (flags & PTE_G) != 0
+}
+
+const fn nonleaf_flags_valid(flags: u32) -> bool {
+    (flags & NONLEAF_RESERVED_MASK) == 0
 }
 
 const fn access_bits_for(request: TranslationRequest) -> u32 {
@@ -897,6 +911,30 @@ mod tests {
         };
 
         assert!(translate_leaf(state, (1 << 10) | PTE_V | PTE_R | PTE_X | PTE_A).is_none());
+    }
+
+    #[test]
+    fn supervisor_nonleaf_pte_rejects_reserved_uad_bits() {
+        let mut bus = CountingBus::new(0x10_000);
+        let mut walker = PageWalker::default();
+        let mut csrs = CsrFile::default();
+        csrs.write(CsrAddress::Satp, sv32_satp(0x2000));
+        bus.store_word(0x2000, sv32_nonleaf_with_flags(0x3000, PTE_A));
+
+        let translated = walker
+            .translate(
+                &mut bus,
+                &csrs,
+                PrivilegeMode::Supervisor,
+                0x4123,
+                MemoryAccess::Load,
+            )
+            .expect("reserved non-leaf bits should still resolve to a page-fault trap");
+
+        assert_eq!(
+            translated,
+            TranslationResult::Fault(Trap::Exception(Exception::LoadPageFault { addr: 0x4123 }))
+        );
     }
 
     #[test]
@@ -1334,7 +1372,11 @@ mod tests {
     }
 
     const fn sv32_nonleaf(next_table: u32) -> u32 {
-        ((next_table >> 12) << 10) | PTE_V
+        sv32_nonleaf_with_flags(next_table, 0)
+    }
+
+    const fn sv32_nonleaf_with_flags(next_table: u32, flags: u32) -> u32 {
+        ((next_table >> 12) << 10) | PTE_V | flags
     }
 
     const fn sv32_leaf(physical_page: u32, flags: u32) -> u32 {
