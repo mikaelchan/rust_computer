@@ -118,16 +118,22 @@ const SUPERVISOR_TVM_SFENCE_TRAP_PROGRAM: &str =
 const SUPERVISOR_TSR_SRET_TRAP_PROGRAM: &str =
     include_str!("programs/supervisor_tsr_sret_trap.hex");
 const SUPERVISOR_TW_WFI_TRAP_PROGRAM: &str = include_str!("programs/supervisor_tw_wfi_trap.hex");
+const SUPERVISOR_CYCLE_COUNTEREN_TRAP_PROGRAM: &str =
+    include_str!("programs/supervisor_cycle_counteren_trap.hex");
 const SUPERVISOR_TIME_COUNTEREN_TRAP_PROGRAM: &str =
     include_str!("programs/supervisor_time_counteren_trap.hex");
 const MACHINE_MCYCLEH_ACCESS_PROGRAM: &str = include_str!("programs/machine_mcycleh_access.hex");
 const INSTRET_SHADOW_WRITE_TRAP_PROGRAM: &str =
     include_str!("programs/instret_shadow_write_trap.hex");
 const USER_MACHINE_CSR_TRAP_PROGRAM: &str = include_str!("programs/user_machine_csr_trap.hex");
+const USER_CYCLE_COUNTEREN_TRAP_PROGRAM: &str =
+    include_str!("programs/user_cycle_counteren_trap.hex");
 const USER_TIME_COUNTEREN_TRAP_PROGRAM: &str =
     include_str!("programs/user_time_counteren_trap.hex");
 const USER_INSTRET_COUNTEREN_TRAP_PROGRAM: &str =
     include_str!("programs/user_instret_counteren_trap.hex");
+const SUPERVISOR_INSTRET_COUNTEREN_TRAP_PROGRAM: &str =
+    include_str!("programs/supervisor_instret_counteren_trap.hex");
 const SUPERVISOR_CYCLE_COUNTEREN_ENABLED_PROGRAM: &str =
     include_str!("programs/supervisor_cycle_counteren_enabled.hex");
 const SUPERVISOR_TIME_COUNTEREN_ENABLED_PROGRAM: &str =
@@ -1833,6 +1839,48 @@ where
     ));
 }
 
+fn assert_supervisor_cycle_counteren_trap_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    const SUPERVISOR_CYCLE_READ_INSTRUCTION: u32 = 0xc000_20f3;
+
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SUPERVISOR_CYCLE_COUNTEREN_TRAP_PROGRAM,
+        RAM_BYTES,
+        setup_supervisor_cycle_counteren_trap_state,
+    );
+
+    step_until(&mut machine, 40, |machine| {
+        machine.cpu().hart_state().registers.read(13) == 1
+            && machine.cpu().hart_state().pc == 0x8
+            && matches!(
+                machine.cpu().hart_state().privilege,
+                PrivilegeMode::Supervisor
+            )
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 0);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), 2);
+    assert_eq!(
+        machine.cpu().hart_state().registers.read(12),
+        SUPERVISOR_CYCLE_READ_INSTRUCTION
+    );
+    assert_eq!(machine.cpu().hart_state().registers.read(13), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mcause), 2);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mtval),
+        SUPERVISOR_CYCLE_READ_INSTRUCTION
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Supervisor
+    ));
+}
+
 fn assert_user_time_counteren_trap_program<P>(make_cpu: fn(u32) -> P)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -1865,6 +1913,45 @@ where
     assert_eq!(
         machine.cpu().hart_state().csrs.read(CsrAddress::Mtval),
         USER_TIME_READ_INSTRUCTION
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::User
+    ));
+}
+
+fn assert_user_cycle_counteren_trap_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    const USER_CYCLE_READ_INSTRUCTION: u32 = 0xc000_20f3;
+
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        USER_CYCLE_COUNTEREN_TRAP_PROGRAM,
+        RAM_BYTES,
+        setup_user_cycle_counteren_trap_state,
+    );
+
+    step_until(&mut machine, 40, |machine| {
+        machine.cpu().hart_state().registers.read(13) == 1
+            && machine.cpu().hart_state().pc == 0x8
+            && matches!(machine.cpu().hart_state().privilege, PrivilegeMode::User)
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 0);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), 2);
+    assert_eq!(
+        machine.cpu().hart_state().registers.read(12),
+        USER_CYCLE_READ_INSTRUCTION
+    );
+    assert_eq!(machine.cpu().hart_state().registers.read(13), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mcause), 2);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mtval),
+        USER_CYCLE_READ_INSTRUCTION
     );
     assert!(matches!(
         machine.cpu().hart_state().privilege,
@@ -1908,6 +1995,48 @@ where
     assert!(matches!(
         machine.cpu().hart_state().privilege,
         PrivilegeMode::User
+    ));
+}
+
+fn assert_supervisor_instret_counteren_trap_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    const SUPERVISOR_INSTRET_READ_INSTRUCTION: u32 = 0xc020_20f3;
+
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SUPERVISOR_INSTRET_COUNTEREN_TRAP_PROGRAM,
+        RAM_BYTES,
+        setup_supervisor_instret_counteren_trap_state,
+    );
+
+    step_until(&mut machine, 40, |machine| {
+        machine.cpu().hart_state().registers.read(13) == 1
+            && machine.cpu().hart_state().pc == 0x8
+            && matches!(
+                machine.cpu().hart_state().privilege,
+                PrivilegeMode::Supervisor
+            )
+    });
+
+    assert_eq!(machine.cpu().hart_state().registers.read(1), 0);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert_eq!(machine.cpu().hart_state().registers.read(11), 2);
+    assert_eq!(
+        machine.cpu().hart_state().registers.read(12),
+        SUPERVISOR_INSTRET_READ_INSTRUCTION
+    );
+    assert_eq!(machine.cpu().hart_state().registers.read(13), 1);
+    assert_eq!(machine.cpu().hart_state().pc, 0x8);
+    assert_eq!(machine.cpu().hart_state().csrs.read(CsrAddress::Mcause), 2);
+    assert_eq!(
+        machine.cpu().hart_state().csrs.read(CsrAddress::Mtval),
+        SUPERVISOR_INSTRET_READ_INSTRUCTION
+    );
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Supervisor
     ));
 }
 
@@ -3523,6 +3652,18 @@ where
         .write(CsrAddress::Mtvec, 0x20);
 }
 
+fn setup_supervisor_cycle_counteren_trap_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20);
+}
+
 fn setup_user_machine_csr_trap_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -3552,6 +3693,23 @@ where
         .write(CsrAddress::Mcounteren, 1 << 1);
 }
 
+fn setup_user_cycle_counteren_trap_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::User;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mcounteren, 1 << 0);
+}
+
 fn setup_user_instret_counteren_trap_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -3567,6 +3725,18 @@ where
         .hart_state_mut()
         .csrs
         .write(CsrAddress::Mcounteren, 1 << 2);
+}
+
+fn setup_supervisor_instret_counteren_trap_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mtvec, 0x20);
 }
 
 fn setup_supervisor_cycle_counteren_enabled_state<P>(machine: &mut Machine<P, MemoryMap>)
@@ -4238,6 +4408,16 @@ fn pipeline_core_runs_supervisor_time_counteren_trap_program() {
 }
 
 #[test]
+fn reference_core_runs_supervisor_cycle_counteren_trap_program() {
+    assert_supervisor_cycle_counteren_trap_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_supervisor_cycle_counteren_trap_program() {
+    assert_supervisor_cycle_counteren_trap_program(PipelineCore::new);
+}
+
+#[test]
 fn reference_core_runs_user_time_counteren_trap_program() {
     assert_user_time_counteren_trap_program(ReferenceCore::new);
 }
@@ -4248,6 +4428,16 @@ fn pipeline_core_runs_user_time_counteren_trap_program() {
 }
 
 #[test]
+fn reference_core_runs_user_cycle_counteren_trap_program() {
+    assert_user_cycle_counteren_trap_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_user_cycle_counteren_trap_program() {
+    assert_user_cycle_counteren_trap_program(PipelineCore::new);
+}
+
+#[test]
 fn reference_core_runs_user_instret_counteren_trap_program() {
     assert_user_instret_counteren_trap_program(ReferenceCore::new);
 }
@@ -4255,6 +4445,16 @@ fn reference_core_runs_user_instret_counteren_trap_program() {
 #[test]
 fn pipeline_core_runs_user_instret_counteren_trap_program() {
     assert_user_instret_counteren_trap_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_supervisor_instret_counteren_trap_program() {
+    assert_supervisor_instret_counteren_trap_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_supervisor_instret_counteren_trap_program() {
+    assert_supervisor_instret_counteren_trap_program(PipelineCore::new);
 }
 
 #[test]
