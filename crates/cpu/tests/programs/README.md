@@ -42,7 +42,11 @@ Current checked-in examples now cover:
 - `Sv32` root-leaf superpage instruction fetch plus data access through one mapping
 - `satp` ASID-namespace reuse that keeps a stale translation until `sfence.vma`
 - machine-mode writes and reads of the high-half `mcycleh` CSR
+- supervisor `cycle` access with enabled `mcounteren`
+- supervisor `time` access sourced from the machine timer with enabled `mcounteren`
 - supervisor `instret` access with enabled `mcounteren`
+- user `cycle` access with enabled counter delegation
+- user `time` access sourced from the machine timer with enabled counter delegation
 - user `cycleh` access with enabled counter delegation
 - user `timeh` access sourced from the machine timer with enabled counter delegation
 - user `instret` access with enabled counter delegation

@@ -1,0 +1,17 @@
+# User-mode cycle access with both mcounteren and scounteren enabled.
+# Host setup preloads:
+# - privilege = User
+# - mcounteren/scounteren allow cycle reads
+# Program reads cycle into x1, executes one addi, reads cycle into x3,
+# compares the two samples into x10, then halts with wfi.
+# Expect x2 = 7, x10 = 1, and x3 > x1.
+0xc00020f3
+0x00700113
+0xc00021f3
+0x0030b533
+0x10500073
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013

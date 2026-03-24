@@ -1,0 +1,18 @@
+# User-mode time access with both mcounteren and scounteren enabled.
+# Host setup preloads:
+# - privilege = User
+# - a machine timer device is mapped
+# - mcounteren/scounteren allow time reads
+# Program reads time into x1, executes one addi, reads time into x3,
+# compares the two samples into x10, then halts with wfi.
+# Expect x2 = 7, x10 = 1, and x3 > x1.
+0xc01020f3
+0x00700113
+0xc01021f3
+0x0030b533
+0x10500073
+0x00000013
+0x00000013
+0x00000013
+0x00000013
+0x00000013

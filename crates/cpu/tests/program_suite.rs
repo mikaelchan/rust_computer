@@ -128,8 +128,16 @@ const USER_TIME_COUNTEREN_TRAP_PROGRAM: &str =
     include_str!("programs/user_time_counteren_trap.hex");
 const USER_INSTRET_COUNTEREN_TRAP_PROGRAM: &str =
     include_str!("programs/user_instret_counteren_trap.hex");
+const SUPERVISOR_CYCLE_COUNTEREN_ENABLED_PROGRAM: &str =
+    include_str!("programs/supervisor_cycle_counteren_enabled.hex");
+const SUPERVISOR_TIME_COUNTEREN_ENABLED_PROGRAM: &str =
+    include_str!("programs/supervisor_time_counteren_enabled.hex");
 const SUPERVISOR_INSTRET_COUNTEREN_ENABLED_PROGRAM: &str =
     include_str!("programs/supervisor_instret_counteren_enabled.hex");
+const USER_CYCLE_COUNTEREN_ENABLED_PROGRAM: &str =
+    include_str!("programs/user_cycle_counteren_enabled.hex");
+const USER_TIME_COUNTEREN_ENABLED_PROGRAM: &str =
+    include_str!("programs/user_time_counteren_enabled.hex");
 const USER_CYCLEH_COUNTEREN_ENABLED_PROGRAM: &str =
     include_str!("programs/user_cycleh_counteren_enabled.hex");
 const USER_TIMEH_COUNTEREN_ENABLED_PROGRAM: &str =
@@ -1903,6 +1911,120 @@ where
     ));
 }
 
+fn assert_supervisor_cycle_counteren_enabled_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        SUPERVISOR_CYCLE_COUNTEREN_ENABLED_PROGRAM,
+        RAM_BYTES,
+        setup_supervisor_cycle_counteren_enabled_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().halted
+    });
+
+    let first = machine.cpu().hart_state().registers.read(1);
+    let second = machine.cpu().hart_state().registers.read(3);
+
+    assert_eq!(machine.cpu().hart_state().registers.read(2), 7);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert!(second > first);
+    assert!(machine.cpu().hart_state().halted);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Supervisor
+    ));
+}
+
+fn assert_supervisor_time_counteren_enabled_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with_map(
+        make_cpu(RESET_VECTOR),
+        SUPERVISOR_TIME_COUNTEREN_ENABLED_PROGRAM,
+        RAM_BYTES,
+        install_machine_timer_device,
+        setup_supervisor_time_counteren_enabled_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().halted
+    });
+
+    let first = machine.cpu().hart_state().registers.read(1);
+    let second = machine.cpu().hart_state().registers.read(3);
+
+    assert_eq!(machine.cpu().hart_state().registers.read(2), 7);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert!(second > first);
+    assert!(machine.cpu().hart_state().halted);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::Supervisor
+    ));
+}
+
+fn assert_user_cycle_counteren_enabled_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with(
+        make_cpu(RESET_VECTOR),
+        USER_CYCLE_COUNTEREN_ENABLED_PROGRAM,
+        RAM_BYTES,
+        setup_user_cycle_counteren_enabled_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().halted
+    });
+
+    let first = machine.cpu().hart_state().registers.read(1);
+    let second = machine.cpu().hart_state().registers.read(3);
+
+    assert_eq!(machine.cpu().hart_state().registers.read(2), 7);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert!(second > first);
+    assert!(machine.cpu().hart_state().halted);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::User
+    ));
+}
+
+fn assert_user_time_counteren_enabled_program<P>(make_cpu: fn(u32) -> P)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    let mut machine = build_machine_with_map(
+        make_cpu(RESET_VECTOR),
+        USER_TIME_COUNTEREN_ENABLED_PROGRAM,
+        RAM_BYTES,
+        install_machine_timer_device,
+        setup_user_time_counteren_enabled_state,
+    );
+
+    step_until(&mut machine, 32, |machine| {
+        machine.cpu().hart_state().halted
+    });
+
+    let first = machine.cpu().hart_state().registers.read(1);
+    let second = machine.cpu().hart_state().registers.read(3);
+
+    assert_eq!(machine.cpu().hart_state().registers.read(2), 7);
+    assert_eq!(machine.cpu().hart_state().registers.read(10), 1);
+    assert!(second > first);
+    assert!(machine.cpu().hart_state().halted);
+    assert!(matches!(
+        machine.cpu().hart_state().privilege,
+        PrivilegeMode::User
+    ));
+}
+
 fn assert_user_cycleh_counteren_enabled_program<P>(make_cpu: fn(u32) -> P)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -3447,6 +3569,30 @@ where
         .write(CsrAddress::Mcounteren, 1 << 2);
 }
 
+fn setup_supervisor_cycle_counteren_enabled_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mcounteren, 1 << 0);
+}
+
+fn setup_supervisor_time_counteren_enabled_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::Supervisor;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mcounteren, 1 << 1);
+}
+
 fn setup_supervisor_instret_counteren_enabled_state<P>(machine: &mut Machine<P, MemoryMap>)
 where
     P: Processor<Error = CpuError> + CpuModel,
@@ -3457,6 +3603,40 @@ where
         .hart_state_mut()
         .csrs
         .write(CsrAddress::Mcounteren, 1 << 2);
+}
+
+fn setup_user_cycle_counteren_enabled_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::User;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mcounteren, 1 << 0);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Scounteren, 1 << 0);
+}
+
+fn setup_user_time_counteren_enabled_state<P>(machine: &mut Machine<P, MemoryMap>)
+where
+    P: Processor<Error = CpuError> + CpuModel,
+{
+    machine.cpu_mut().hart_state_mut().privilege = PrivilegeMode::User;
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Mcounteren, 1 << 1);
+    machine
+        .cpu_mut()
+        .hart_state_mut()
+        .csrs
+        .write(CsrAddress::Scounteren, 1 << 1);
 }
 
 fn setup_user_cycleh_counteren_enabled_state<P>(machine: &mut Machine<P, MemoryMap>)
@@ -4078,6 +4258,26 @@ fn pipeline_core_runs_user_instret_counteren_trap_program() {
 }
 
 #[test]
+fn reference_core_runs_supervisor_cycle_counteren_enabled_program() {
+    assert_supervisor_cycle_counteren_enabled_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_supervisor_cycle_counteren_enabled_program() {
+    assert_supervisor_cycle_counteren_enabled_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_supervisor_time_counteren_enabled_program() {
+    assert_supervisor_time_counteren_enabled_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_supervisor_time_counteren_enabled_program() {
+    assert_supervisor_time_counteren_enabled_program(PipelineCore::new);
+}
+
+#[test]
 fn reference_core_runs_user_cycleh_counteren_enabled_program() {
     assert_user_cycleh_counteren_enabled_program(ReferenceCore::new);
 }
@@ -4105,6 +4305,26 @@ fn reference_core_runs_machine_mcycleh_access_program() {
 #[test]
 fn pipeline_core_runs_machine_mcycleh_access_program() {
     assert_machine_mcycleh_access_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_user_cycle_counteren_enabled_program() {
+    assert_user_cycle_counteren_enabled_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_user_cycle_counteren_enabled_program() {
+    assert_user_cycle_counteren_enabled_program(PipelineCore::new);
+}
+
+#[test]
+fn reference_core_runs_user_time_counteren_enabled_program() {
+    assert_user_time_counteren_enabled_program(ReferenceCore::new);
+}
+
+#[test]
+fn pipeline_core_runs_user_time_counteren_enabled_program() {
+    assert_user_time_counteren_enabled_program(PipelineCore::new);
 }
 
 #[test]
